@@ -1,6 +1,9 @@
 # Agent skills
 
-A collection of reusable `SKILL.md` instructions for coding agents. Each skill defines when to use a workflow and how to carry it out. Some are general-purpose; others assume Kyle's local tools, accounts, or directory layout. Read a skill's requirements before using it elsewhere.
+A collection of reusable `SKILL.md` instructions for coding agents. Each
+skill defines when to use a workflow and how to carry it out. Some are
+general-purpose; others assume Kyle's local tools, accounts, or directory
+layout. Read a skill's requirements before using it elsewhere.
 
 ## Skills
 
@@ -23,15 +26,39 @@ A collection of reusable `SKILL.md` instructions for coding agents. Each skill d
 | [report](report/SKILL.md) | Write an Obsidian report for substantial work or on request. |
 | [skill-authoring](skill-authoring/SKILL.md) | Create and refine agent skills. |
 
-## Using a skill
+## Development and installation
 
-Each skill lives in its own directory with a `SKILL.md` containing a name, description, and instructions. Some also include `references/` files used by the workflow. Place the **whole directory** in a location your agent scans for skills; consult your agent's documentation for its discovery and invocation rules. For example, if your agent scans `~/.agents/skills`, you can link a skill from this checkout:
+Keep two independent checkouts: `~/Development/skills` is the development
+checkout, while `~/.agents/skills` is the installed checkout. The installed
+path is a real Git clone, not a symlink to the development checkout. On a new
+device where `~/.agents/skills` does not already exist, install it with:
 
 ```sh
-mkdir -p ~/.agents/skills
-ln -s "$PWD/developer" ~/.agents/skills/developer
+git clone git@github.com:KyleMyers001/skills.git "$HOME/.agents/skills"
 ```
 
-Run the example from the repository root, and use the individual skill path (for example, `orchestration/herdr`) for nested skills. Don't replace an existing installed skill without checking it first.
+Inspect an existing installation before cloning; do not overwrite it. Make
+changes in the development checkout on a feature branch, open a PR, and wait
+for approval before merging. Once changes have landed on the remote default
+branch, update a clean installed checkout with:
 
-These files are instructions, not bundled executables. Tools such as `agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed and configured separately where required. The descriptions in each `SKILL.md` specify when a skill should activate; in particular, opt-in workflows should not be triggered merely because their topic comes up.
+```sh
+git -C "$HOME/.agents/skills" pull --ff-only
+```
+
+Review remote skill changes before pulling: skills are instructions that can
+change agent behavior. Restart Pi or use `/reload` in an active session to pick
+up updates. Do not edit the installed checkout or pull unpublished development
+branches into it.
+
+Each skill lives in its own directory with a `SKILL.md` containing a name,
+description, and instructions. Some also include `references/` files used by
+the workflow. Agents that discover skills recursively can find nested skills
+such as `orchestration/herdr`; consult your agent's documentation for its
+specific discovery rules.
+
+These files are instructions, not bundled executables. Tools such as
+`agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed and
+configured separately where required. The descriptions in each `SKILL.md`
+specify when a skill should activate; in particular, opt-in workflows should
+not be triggered merely because their topic comes up.
