@@ -15,7 +15,7 @@ A collection of reusable `SKILL.md` instructions for coding agents. Each skill d
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
 | [lavish](lavish/SKILL.md) | Create reviewable HTML artifacts for visual or complex responses. |
 | [no-mistakes](no-mistakes/SKILL.md) | Gate changes with review, tests, lint, docs, PR, and CI checks. |
-| [astra-review](orchestration/astra-review/SKILL.md) | Request a Themis review on Astra through Herdr. |
+| [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
 | [fable-review](orchestration/fable-review/SKILL.md) | Request a Fable review through Claude Code and Herdr. |
 | [herdr](orchestration/herdr/SKILL.md) | Coordinate coding agents in a Herdr session. |
 | [orchestrate-ticket](orchestration/orchestrate-ticket/SKILL.md) | Run an explicitly invoked ticket pipeline with delegated agents. |

@@ -1,14 +1,14 @@
 ---
 name: astra-review
 description: >-
-  Launch Themis on Astra with high reasoning through Herdr's Subagents session
-  and return its review in full. Use for /skill:astra-review or requests for an
-  Astra or Themis review; use fable-review for Fable.
+  Launch Astra with high reasoning through Herdr's Subagents session and return
+  its review in full. Use for /skill:astra-review or requests for an Astra review;
+  use fable-review for Fable.
 ---
 
-# Themis Review on Astra
+# Astra Review
 
-Use the **Themis** persona, **Astra**, **high** reasoning, and Pi. This is a
+Use **Astra**, **high** reasoning, and Pi. This is a
 trusted-agent workflow, not an enforced read-only sandbox: Bash remains
 available for inspection/tests.
 
@@ -36,36 +36,25 @@ available for inspection/tests.
    files. For non-Git targets, hash reviewed files with `shasum -a 256`.
 3. Confirm that `pi --list-models astra` contains the exact model
    `openai-codex/gpt-6-astra`. If it is unavailable, stop; never guess or
-   substitute another provider, Astra variant, or GPT 5.6 Sol Max. Require the
-   persona definition before creating the review tab:
-
-   ```bash
-   test -r ~/Agents/agents/Themis.md
-   ```
-
-   If it is unavailable, stop; never fall back to an unnamed reviewer or another
-   persona. Do not invoke the `themis` shell alias, source `~/.zshrc`, or depend
-   on shell alias expansion.
+   substitute another provider, Astra variant, or GPT 5.6 Sol Max.
 
    Discover the matching workspace and a short unique name prefixed with
-   `themis-astra-review`; create an unfocused background tab and launch one fresh
+   `astra-review`; create an unfocused background tab and launch one fresh
    conversation with the discovered model. Never reuse an existing conversation:
 
    ```bash
-   herdr --session Subagents agent start <unique-themis-name> \
+   herdr --session Subagents agent start <unique-astra-name> \
      --kind pi --pane <discovered-pane-id> -- \
-     --append-system-prompt ~/Agents/agents/Themis.md \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
 
-   Inspect `agent get`/`agent read` for the correct directory, launch errors,
-   and, when Pi shows its loaded context, `agents/Themis.md`. If the startup
-   display visibly contradicts the requested persona, model, reasoning, or
+   Inspect `agent get`/`agent read` for the correct directory and launch errors.
+   If the startup display visibly contradicts the requested model, reasoning, or
    directory, stop and ask Kyle before submitting the task. Missing display
    metadata is not a new gate. Do not revalidate transcript metadata after
    submission. Excluding tools is defense in depth, not a Bash security boundary.
-4. Set `agent_name` to the launched agent's unique Themis-based name. Add step
+4. Set `agent_name` to the launched agent's unique Astra-based name. Add step
    2's scope below.
    Run this directly in Bash, not inside another `sh -c`/`eval` string. The
    quoted heredoc preserves prompt text literally. Avoid `$(...)` around the
@@ -120,6 +109,6 @@ available for inspection/tests.
    Do not clean up, close the tab, or stop the agent without Kyle's explicit
    approval.
 
-Use another harness only if Kyle explicitly requests it. Preserve Themis,
+Use another harness only if Kyle explicitly requests it. Preserve
 `openai-codex/gpt-6-astra`, high reasoning, the same scope, and global
 safeguards.
