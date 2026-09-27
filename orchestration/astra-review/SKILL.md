@@ -39,19 +39,24 @@ available for inspection/tests.
    `openai-codex/gpt-6-astra`. If it is unavailable, stop; never guess or
    substitute another provider, Astra variant, or GPT 5.6 Sol Max.
 
-   Discover the matching workspace and a short unique name prefixed with
-   `astra-review`; create an unfocused background tab and launch one fresh
-   conversation with the discovered model. Never reuse an existing conversation:
+   Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
+   review skill. Choose a short unique name prefixed with `astra-review` and
+   launch one fresh conversation with the verified model. The helper discovers
+   the workspace and creates an unfocused tab or workspace root; do not repeat
+   that discovery/creation manually. Never reuse an existing conversation:
 
    ```bash
-   herdr --session Subagents agent start <unique-astra-name> \
-     --kind pi --pane <discovered-pane-id> -- \
+   python3 "$herdr_dir/scripts/launch-agent.py" \
+     --cwd "<absolute repository/worktree path>" \
+     --name <unique-astra-name> --kind pi -- \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
 
-   Use Herdr's short startup `get`/`read` once for directory and launch errors.
-   If the startup display visibly contradicts the requested model, reasoning, or
+   Inspect returned `startup` once for directory and launch errors; it replaces
+   the routine separate startup `get`/`read`. Empty/truncated output, changed
+   state, or failures follow Herdr's inspection/recovery rules, not blind
+   relaunch. If startup visibly contradicts the requested model, reasoning, or
    directory, stop and ask Kyle before submitting the task. Missing display
    metadata is not a new gate. Do not revalidate transcript metadata after
    submission. Excluding tools is defense in depth, not a Bash security boundary.

@@ -351,6 +351,28 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertEqual(data["kind"], "claude")
         self.assertEqual(data["session"]["value"], "exact-session-id")
 
+    def test_reviewer_model_reasoning_and_tool_flags_are_forwarded_exactly(self):
+        profiles = [
+            ("pi", ["--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+                    "--exclude-tools", "edit,write"]),
+            ("claude", ["--model", "fable", "--effort", "high",
+                        "--disallowed-tools", "Edit,Write,NotebookEdit"]),
+        ]
+        for kind, native in profiles:
+            with self.subTest(kind=kind):
+                steps = self.happy_steps()
+                agent = {**self.agent, "agent": kind, "agent_session": {
+                    **self.agent["agent_session"], "agent": kind}}
+                steps[-2] = step([
+                    "agent", "start", "worker", "--kind", kind,
+                    "--pane", "w2:p1", "--timeout", "30000", "--", *native,
+                ], response("agent_started", agent=agent))
+                result, calls = self.run_launcher(
+                    steps, ["--kind", kind, "--", *native])
+                self.assertEqual(self.assert_success(result)["kind"], kind)
+                self.assertEqual(calls, [item["args"] for item in steps])
+                self.assertEqual(calls[-2][-len(native):], native)
+
     def test_startup_warnings_and_drafts_are_returned_for_judgment(self):
         text = "Authentication required\nWrong model loaded\n> Human draft"
         steps = self.happy_steps()

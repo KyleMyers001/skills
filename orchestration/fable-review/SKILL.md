@@ -43,22 +43,27 @@ inspection/tests.
    ambiguous, stop and ask Kyle; never silently substitute a harness/provider.
    Do not print credentials.
 
-   Discover the matching workspace and a unique name; create an unfocused
-   background tab. Start one **fresh** Claude conversation; never reuse an
-   existing conversation:
+   Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
+   review skill. Choose a unique name and start one **fresh** Claude conversation.
+   The helper discovers the workspace and creates an unfocused tab or workspace
+   root; do not repeat that discovery/creation manually. Never reuse an existing
+   conversation:
 
    ```bash
-   herdr --session Subagents agent start <unique-name> \
-     --kind claude --pane <discovered-pane-id> -- \
+   python3 "$herdr_dir/scripts/launch-agent.py" \
+     --cwd "<absolute repository/worktree path>" \
+     --name <unique-name> --kind claude -- \
      --model fable --effort high --disallowed-tools Edit,Write,NotebookEdit
    ```
 
-   Use Herdr's short startup `get`/`read` once for directory and launch errors
-   before prompting. If the startup display visibly contradicts the requested
-   model, effort, or directory, stop and ask Kyle before submitting the task.
-   Missing display metadata is not a new gate. Do not revalidate transcript
-   metadata after submission. Never bypass Claude permissions.
-   Tool exclusions are defense in depth, not a Bash security boundary.
+   Inspect returned `startup` once for directory and launch errors; it replaces
+   the routine separate startup `get`/`read`. Empty/truncated output, changed
+   state, or failures follow Herdr's inspection/recovery rules, not blind
+   relaunch. If startup visibly contradicts the requested model, effort, or
+   directory, stop and ask Kyle before submitting the task. Missing display
+   metadata is not a new gate. Do not revalidate transcript metadata after
+   submission. Never bypass Claude permissions. Tool exclusions are defense in
+   depth, not a Bash security boundary.
 4. Set `agent_name` to the launched agent's name. Add step 2's scope below.
    Run this directly in Bash, not inside another `sh -c`/`eval` string. The
    quoted heredoc preserves prompt text literally. Avoid `$(...)` around the

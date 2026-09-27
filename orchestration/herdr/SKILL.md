@@ -36,10 +36,20 @@ python3 "$herdr_dir/scripts/launch-agent.py" \
 It matches live directories, creates one unfocused tab or workspace root, starts
 once, and returns compact metadata plus startup text. Optional `--workspace`
 verifies a discovered workspace; `--timeout` sets startup milliseconds
-(default 30000, maximum 300000). Native arguments follow `--`.
+(default 30000, maximum 300000).
+
+Forward requested model and reasoning settings after `--`, using native flags:
+
+- Pi: `-- --model <provider/model> --thinking <level>`.
+- Claude Code: `-- --model <model> --effort <level>`.
+
+The helper passes these through unchanged; omitted settings use harness defaults.
+Check installed harness help for unfamiliar flags/levels. If a requested setting
+is unavailable, stop and ask Kyle; never silently drop or substitute it.
 
 Inspect returned `startup` for errors, drafts, permissions, and requested
-persona/model contradictions **before prompting**. Readiness is not approval.
+persona/model/reasoning/effort contradictions **before prompting**. Readiness is
+not approval.
 Empty/truncated startup needs targeted inspection; never submit blindly.
 
 Read [manual launch and recovery](references/manual-launch.md) before named
