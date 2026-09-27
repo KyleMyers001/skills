@@ -46,7 +46,10 @@ above or explicit exceptions. Check by substance, not heading names or preferred
 phrasing; do not reformat an otherwise complete approved plan. If closed-loop is
 chosen later, reconcile actual gaps rather than routinely replanning.
 
-Approval covers the entire revision, including execution details. Implementation
-also requires authorization to proceed; material scope, acceptance, approach, or
-verification changes and revisions to fill missing requirements need fresh approval.
-Routine execution details within the approved scope are not new product decisions.
+Follow planning's [Approval & Execution](../SKILL.md#approval--execution):
+unqualified approval covers the entire revision, including execution details,
+and authorizes in-scope implementation by its execution owner without a separate
+“proceed.” Preserve holds, handoff restrictions, and closed-loop's opt-in gate.
+Material scope, acceptance, approach, or verification changes, including filling
+missing requirements, need fresh approval. Routine execution details within the
+approved scope are not new product decisions.

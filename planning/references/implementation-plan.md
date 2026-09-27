@@ -8,6 +8,9 @@
 - **Revision:** 1
 - **Updated:** YYYY-MM-DD
 
+Template note: For handoff and approval records, follow
+[Approval & Execution](../SKILL.md#approval--execution).
+
 ## Context & Goal
 
 - **Problem:** {Current behavior and why it needs to change.}
