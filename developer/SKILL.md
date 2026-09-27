@@ -11,18 +11,15 @@ description: >-
 Optimize for code another developer can understand and safely change. Explicit
 requirements and project conventions take precedence over these preferences.
 
-When editing or reviewing code, read only the matching local guide:
+Use the relevant style guide as general guidance, not a strict compliance
+checklist. Project conventions, lint rules, and formatters take precedence.
 
-- TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`):
-  [TypeScript](references/typescript.md), not the JavaScript guide.
-- JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`):
-  [JavaScript](references/javascript.md).
-- Python (`.py`, `.pyi`): [Python](references/python.md).
+- TypeScript: [Google TypeScript Style Guide](https://google.github.io/styleguide/tsguide.html).
+- JavaScript: [Google JavaScript Style Guide](https://google.github.io/styleguide/jsguide.html).
+- Python: [PEP 8](https://peps.python.org/pep-0008/).
 
-For mixed-language work, read one guide per language involved; for other
-languages, read none. External source links are citations, not reading
-instructions: do not fetch them for normal coding work. Consult one only if
-the user explicitly requests source verification or strict compliance.
+These links are citations, not reading instructions. Do not fetch them unless
+the user requests source verification or strict compliance.
 
 ## Implementation
 
