@@ -14,8 +14,9 @@ available for inspection/tests.
 
 ## Runbook
 
-1. Read [Herdr](../herdr/SKILL.md) completely and follow its discovery, targeting,
-   waiting, and safety rules. Every Herdr command needs `--session Subagents`.
+1. Load [Herdr](../herdr/SKILL.md) unless already read for this invocation;
+   follow its discovery, targeting, waiting, and safety rules. Reuse its checks,
+   not a second checklist. Every Herdr command needs `--session Subagents`.
 2. Establish absolute target path, branch, base/commit range, and included
    staged/unstaged/untracked files. Record `git status --short --branch` and
    this digest before review:
@@ -49,7 +50,7 @@ available for inspection/tests.
      --exclude-tools edit,write
    ```
 
-   Inspect `agent get`/`agent read` for the correct directory and launch errors.
+   Use Herdr's short startup `get`/`read` once for directory and launch errors.
    If the startup display visibly contradicts the requested model, reasoning, or
    directory, stop and ask Kyle before submitting the task. Missing display
    metadata is not a new gate. Do not revalidate transcript metadata after
@@ -63,6 +64,8 @@ available for inspection/tests.
 
    ```bash
    IFS= read -r -d '' prompt <<'REVIEW_PROMPT' || :
+   I am an orchestrating agent working on Kyle's behalf. This is an assigned
+   review to carry out; reply to me, not Kyle.
    Review the current work in this repository fully and carefully as a neutral
    senior developer reviewing a junior developer's changes.
 
@@ -86,19 +89,21 @@ available for inspection/tests.
    submission. For blocked, unknown, stalled, or timed-out results, inspect
    `agent get` and `agent read`. Never blindly resend or overwrite composer text;
    uncertain receipt is not permission to duplicate work.
-5. Read the completed report from that agent and return it in full, without
-   rewriting, summarizing, or dropping findings. Minimally redact secrets and
-   disclose redactions. Idle alone is inconclusive: inspect the response for a
-   final report or a genuine agent failure. Surface launch, authentication,
+5. Use Herdr's Return Output path directly after waiting: mapped text extraction
+   first, bounded terminal fallback only if needed. Never load raw JSONL, require
+   a handoff validator, or read the full report by both routes. Return it in full,
+   without rewriting, summarizing, or dropping findings. Minimally redact secrets
+   and disclose redactions. Idle alone is inconclusive: inspect for a final report
+   or a genuine agent failure. Surface launch, authentication,
    permission, usage/rate-limit, timeout, or agent failures honestly; label
    partial output.
 
-   Prefer original text when readily available; use the optional
-   [output retrieval notes](references/persisted-output.md) if needed. Otherwise
-   return the visible report, disclosing terminal-rendered text or truncation.
-   Transcript formatting, prompt wrappers, missing metadata, or bookkeeping
-   failures must not block a completed report. Do not require exact prompt
-   matching or persisted-output validation.
+   Use the optional [retrieval notes](references/persisted-output.md) only for
+   mapping/helper details. If a report is already visible, return it rather than
+   extracting another copy. Parser errors, changed response format, wrappers,
+   missing metadata, and bookkeeping failures must not block an accessible
+   report. Return the available terminal response with any rendering/truncation
+   limitation; do not require exact prompt matching or persisted-output validation.
 
    Inspect/read/wait on the same agent. Without Kyle's explicit approval,
    never restart, re-prompt, launch another reviewer, or ask it to copy or
