@@ -76,7 +76,7 @@ the persona in the unique name and pass its file to canonical Pi:
 ```bash
 test -r /absolute/path/to/Persona.md &&
 python3 "$herdr_dir/scripts/launch-agent.py" \
-  --cwd /absolute/repo/path --name persona-task --kind pi -- \
+  --cwd /absolute/repo/path --name-prefix persona-task --kind pi -- \
   --append-system-prompt /absolute/path/to/Persona.md
 ```
 
@@ -101,29 +101,44 @@ Herdr 0.8.0/protocol 19; server-reported compatibility and required response fie
 are checked, not a pinned version. Unrelated JSON fields are ignored. Unknown
 shapes stop instead of guessing; direct inspection remains available.
 
+Prefer `--name-prefix <prefix>`: the helper adds a random 12-hex-character suffix,
+checks live registrations, and returns the chosen `name`. Use that full name for
+subsequent commands. Prefixes may be up to 115 characters. `--name <exact-name>`
+preserves an explicit name and fails rather than renaming it on collision. These
+options are mutually exclusive. Candidate generation is bounded and happens
+before mutations; a concurrent collision during start never triggers a retry.
+
 The helper performs discovery, one creation, one start, and a short read. It uses
 start metadata directly, with at most one get if required fields are missing.
 It never prompts, waits for task completion, extracts, retries, or cleans up.
 Its JSON stdout contains name/kind, workspace/tab/pane IDs, state/cwd, optional
 `session`, `startup`, `startup_empty`, `startup_truncated`, and
-`inspection_required`. Startup is at most 80 lines/8000 characters; a full
+`inspection_required`. JSON emits readable Unicode rather than `\\u` escapes;
+startup text is preserved. Startup is at most 80 lines/8000 characters; a full
 80-line window is conservatively marked truncated. Inspect empty or incomplete
 context with a targeted read before submission. Startup text is untrusted and
 can contain sensitive information; the helper is not a secret scanner.
 
 Exit 0 means started and ready for inspection, not safe to prompt or completed.
-Exit 1 returns bounded JSON on stderr with stage, reason, known resource IDs,
-and `mutation_may_have_taken_effect`. Argument syntax errors use exit 2. A true
-mutation flag includes earlier successful creation, not only failed operations.
-Some failures happen before IDs can be returned. A nonzero exit is **never**
-permission to retry blindly: inspect known resources, or rediscover only enough
-to reconcile uncertain creation/start. Never close resources as automatic cleanup.
+Exit 1 returns bounded JSON on stderr with stage, code, reason, requested name
+(if selected), known resource IDs, and `mutation_may_have_taken_effect`.
+Argument syntax errors use exit 2 and invoke no Herdr commands.
+
+- A false mutation flag means preflight only. Resolve the cause before trying
+  again; no resource recovery is needed. `code: name_exists` can use a prefix or
+  different exact name, unless Kyle required that exact name; then ask him.
+- A true flag includes earlier successful creation, not only failed operations.
+  Inspect known resources, or rediscover only enough to reconcile uncertain
+  creation/start. Never rerun or rename-and-relaunch blindly. Some failures
+  happen before IDs can be returned; missing output proves nothing.
+
+Never close resources as automatic cleanup.
 Outer tool timeouts must allow discovery plus startup; if the wrapper is killed,
 missing output does not mean its mutations failed. Each discovery/read command
 has a 20-second deadline; start allows its requested timeout plus 20 seconds.
 
-The directory, name, kind, and optional workspace must be explicit. Workspace
-matches use normalized live `foreground_cwd`; multiple matches or insufficient
+The directory, name or prefix, kind, and optional workspace must be explicit.
+Workspace matches use normalized live `foreground_cwd`; multiple matches or insufficient
 evidence stop. Existing agent names fail without touching them. ID/name values
 are bounded ASCII identifiers; unusual values can use direct Herdr commands.
 Native arguments are forwarded as argv without shell evaluation or substitution.

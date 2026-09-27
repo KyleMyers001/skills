@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 
 
 COMMAND_TIMEOUT = 20
@@ -22,6 +23,25 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 class LaunchUnavailable(Exception):
     """A bounded, locally authored diagnostic safe to return to the caller."""
+
+    def __init__(self, message, code="launch_unavailable"):
+        super().__init__(message)
+        self.code = code
+
+
+def choose_name(name, prefix, existing):
+    if prefix is None:
+        if name in existing:
+            raise LaunchUnavailable("Agent name already exists.", "name_exists")
+        return name
+    # Random suffixes avoid routinely colliding with concurrent launchers.
+    # Check the current registry too; never retry an actual start on collision.
+    for _ in range(10):
+        candidate = f"{prefix}-{uuid.uuid4().hex[:12]}"
+        if candidate not in existing:
+            return candidate
+    raise LaunchUnavailable("Could not generate an unused name.",
+                            "name_generation_failed")
 
 
 def identifier(value):
@@ -170,8 +190,11 @@ class Launcher:
 
     def launch(self):
         args = self.args
-        if any(not identifier(value) for value in (args.name, args.kind)):
-            raise LaunchUnavailable("Name/kind must be short identifiers, not options.")
+        requested_name = args.name if args.name is not None else args.name_prefix
+        if any(not identifier(value) for value in (requested_name, args.kind)):
+            raise LaunchUnavailable("Name/prefix and kind must be short identifiers.")
+        if args.name_prefix is not None and len(args.name_prefix) > 115:
+            raise LaunchUnavailable("Name prefix must be at most 115 characters.")
         if args.workspace is not None and not identifier(args.workspace):
             raise LaunchUnavailable("Workspace must be a discovered identifier.")
         if not 1 <= args.timeout <= 300000:
@@ -191,8 +214,8 @@ class Launcher:
         if any(not isinstance(agent.get("name"), str) or not agent["name"]
                for agent in agents):
             raise LaunchUnavailable("Agent names could not be established.")
-        if any(agent["name"] == args.name for agent in agents):
-            raise LaunchUnavailable("Agent name already exists; choose a unique name.")
+        args.name = choose_name(args.name, args.name_prefix,
+                                {agent["name"] for agent in agents})
         self.create(self.workspace())
         self.stage = "start"
         argv = ["agent", "start", args.name, "--kind", args.kind, "--pane",
@@ -240,7 +263,9 @@ def main(argv=None):
         argv, native = argv[:boundary], argv[boundary + 1:]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", required=True, help="absolute existing directory")
-    parser.add_argument("--name", required=True, help="short unique agent name")
+    naming = parser.add_mutually_exclusive_group(required=True)
+    naming.add_argument("--name", help="exact agent name; collisions fail unchanged")
+    naming.add_argument("--name-prefix", help="generate an unused name from this prefix")
     parser.add_argument("--kind", required=True, help="Herdr-supported canonical kind")
     parser.add_argument("--workspace", help="discovered workspace ID; verified live")
     parser.add_argument("--timeout", type=int, default=30000,
@@ -251,17 +276,27 @@ def main(argv=None):
     try:
         result = launcher.launch()
     except (LaunchUnavailable, KeyboardInterrupt) as error:
+        code = error.code if isinstance(error, LaunchUnavailable) else "interrupted"
+        if launcher.mutation_attempted:
+            next_step = ("Do not relaunch blindly. Inspect known resources; "
+                         "nothing was cleaned up.")
+        elif code == "name_exists":
+            next_step = ("No mutations were attempted. Choose --name-prefix or a "
+                         "different --name; no recovery inspection is needed.")
+        else:
+            next_step = ("No mutations were attempted. Resolve this preflight "
+                         "issue before trying again.")
         print(json.dumps({
-            "status": "error", "stage": launcher.stage,
+            "status": "error", "stage": launcher.stage, "code": code,
             "reason": (str(error) if isinstance(error, LaunchUnavailable)
                        else "Interrupted."),
             "resources": launcher.resources,
+            "requested_name": args.name if identifier(args.name) else None,
             "mutation_may_have_taken_effect": launcher.mutation_attempted,
-            "next": ("Do not relaunch blindly. Inspect known resources; "
-                     "nothing was cleaned up."),
-        }), file=sys.stderr)
+            "next": next_step,
+        }, ensure_ascii=False), file=sys.stderr)
         return 1
-    print(json.dumps(result))
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

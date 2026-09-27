@@ -40,15 +40,15 @@ available for inspection/tests.
    substitute another provider, Astra variant, or GPT 5.6 Sol Max.
 
    Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
-   review skill. Choose a short unique name prefixed with `astra-review` and
-   launch one fresh conversation with the verified model. The helper discovers
-   the workspace and creates an unfocused tab or workspace root; do not repeat
-   that discovery/creation manually. Never reuse an existing conversation:
+   review skill. Use the `astra-review` name prefix and launch one fresh
+   conversation with the verified model. The helper discovers the workspace and
+   creates an unfocused tab or workspace root; do not repeat discovery/creation
+   manually. Never reuse an existing conversation:
 
    ```bash
    python3 "$herdr_dir/scripts/launch-agent.py" \
      --cwd "<absolute repository/worktree path>" \
-     --name <unique-astra-name> --kind pi -- \
+     --name-prefix astra-review --kind pi -- \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
@@ -60,8 +60,8 @@ available for inspection/tests.
    directory, stop and ask Kyle before submitting the task. Missing display
    metadata is not a new gate. Do not revalidate transcript metadata after
    submission. Excluding tools is defense in depth, not a Bash security boundary.
-4. Set `agent_name` to the launched agent's unique Astra-based name. Add step
-   2's scope below.
+4. Set `agent_name` to the returned `name`, including its generated suffix.
+   Add step 2's scope below.
    Run this directly in Bash, not inside another `sh -c`/`eval` string. The
    quoted heredoc preserves prompt text literally. Avoid `$(...)` around the
    heredoc: macOS Bash 3.2 can misparse embedded quotes there. `read` returns

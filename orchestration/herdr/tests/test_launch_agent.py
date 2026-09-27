@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/launch-agent.py"
-FAKE = r'''import json, os, sys
+FAKE = r'''import json, os, re, sys
 from pathlib import Path
 args = sys.argv[1:]
 log = Path(os.environ["FAKE_LOG"])
@@ -20,11 +20,20 @@ with log.open("a") as stream:
     stream.write(json.dumps(args) + "\n")
 steps = json.loads(Path(os.environ["FAKE_STEPS"]).read_text())
 index = len(log.read_text().splitlines()) - 1
-if index >= len(steps) or args != steps[index]["args"]:
-    print("unexpected command", file=sys.stderr)
+if index >= len(steps):
     sys.exit(90)
 step = steps[index]
-sys.stdout.write(step.get("output", ""))
+expected = step["args"]
+generated = None
+for actual, wanted in zip(args, expected):
+    if wanted == "$GENERATED_NAME" and re.fullmatch(r"[A-Za-z0-9_.:-]+-[0-9a-f]{12}", actual):
+        generated = actual
+if generated:
+    expected = [generated if arg == "$GENERATED_NAME" else arg for arg in expected]
+if args != expected:
+    print("unexpected command", file=sys.stderr)
+    sys.exit(90)
+sys.stdout.write(step.get("output", "").replace("$GENERATED_NAME", generated or ""))
 sys.stderr.write(step.get("stderr", ""))
 sys.exit(step.get("code", 0))
 '''
@@ -117,13 +126,25 @@ class LaunchAgentTests(unittest.TestCase):
             steps += [self.panes()]
         return steps + [self.creation(existing), self.start(native), self.read()]
 
-    def run_launcher(self, steps, extra=(), cwd=None, env=None):
+    def prefix_steps(self, existing=False):
+        steps = self.happy_steps(existing=existing)
+        for item in steps:
+            item["args"] = ["$GENERATED_NAME" if arg == "worker" else arg
+                            for arg in item["args"]]
+            item["output"] = item["output"].replace(
+                '"worker"', '"$GENERATED_NAME"')
+        steps[1] = step(["agent", "list"], response(
+            "agent_list", agents=[{"name": "worker"}]))
+        return steps
+
+    def run_launcher(self, steps, extra=(), cwd=None, env=None, naming=None):
         self.steps_file.write_text(json.dumps(steps))
         if self.log.exists():
             self.log.write_text("")
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--cwd", str(cwd or self.cwd),
-             "--name", "worker", "--kind", "pi", *extra],
+             *(naming if naming is not None else ["--name", "worker"]),
+             "--kind", "pi", *extra],
             env=env or self.env, capture_output=True, text=True,
             cwd=self.directory, timeout=15,
         )
@@ -153,7 +174,11 @@ class LaunchAgentTests(unittest.TestCase):
         data = json.loads(result.stderr)
         self.assertEqual(data["stage"], stage)
         self.assertLess(len(result.stderr), 1500)
-        self.assertIn("Do not relaunch", data["next"])
+        if data["mutation_may_have_taken_effect"]:
+            self.assertIn("Do not relaunch", data["next"])
+        else:
+            self.assertIn("No mutations", data["next"])
+            self.assertNotIn("Do not relaunch", data["next"])
         return data
 
     def test_new_workspace_uses_root_without_creating_tab(self):
@@ -231,8 +256,88 @@ class LaunchAgentTests(unittest.TestCase):
         steps[-1] = step(["agent", "list"], response(
             "agent_list", agents=[{"name": "worker"}]))
         result, calls = self.run_launcher(steps)
-        self.assert_failure(result, "name")
+        data = self.assert_failure(result, "name")
+        self.assertEqual(data["code"], "name_exists")
+        self.assertFalse(data["mutation_may_have_taken_effect"])
+        self.assertIn("--name-prefix", data["next"])
         self.assertEqual(len(calls), 2)
+
+    def test_generated_names_are_fresh_and_used_for_all_launch_commands(self):
+        names = []
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                steps = self.prefix_steps(existing=existing)
+                result, calls = self.run_launcher(
+                    steps, naming=["--name-prefix", "worker"])
+                name = self.assert_success(result)["name"]
+                self.assertRegex(name, r"^worker-[0-9a-f]{12}$")
+                names.append(name)
+                expected = json.loads(json.dumps(steps).replace(
+                    "$GENERATED_NAME", name))
+                self.assertEqual(calls, [item["args"] for item in expected])
+        self.assertEqual(len(names), 2)
+        self.assertNotEqual(names[0], names[1])
+
+    def test_generated_name_start_failure_is_not_renamed_or_retried(self):
+        steps = self.prefix_steps()[:-1]
+        steps[-1].update(code=1, output="PRIVATE_PAYLOAD")
+        result, calls = self.run_launcher(
+            steps, naming=["--name-prefix", "worker"])
+        data = self.assert_failure(result, "start")
+        self.assertTrue(data["mutation_may_have_taken_effect"])
+        self.assertRegex(data["requested_name"], r"^worker-[0-9a-f]{12}$")
+        self.assertEqual(data["requested_name"], calls[-1][4])
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(data["resources"]["pane_id"], "w2:p1")
+
+    def test_name_generation_checks_registry_and_is_bounded(self):
+        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        occupied = "worker-" + "a" * 12
+        fresh = "worker-" + "b" * 12
+        with patch.object(module.uuid, "uuid4", side_effect=[
+                module.uuid.UUID("a" * 32), module.uuid.UUID("b" * 32)]) as generate:
+            self.assertEqual(module.choose_name(None, "worker", {occupied}), fresh)
+            self.assertEqual(generate.call_count, 2)
+        with patch.object(module.uuid, "uuid4",
+                          return_value=module.uuid.UUID("a" * 32)) as generate:
+            with self.assertRaises(module.LaunchUnavailable) as raised:
+                module.choose_name(None, "worker", {occupied})
+            self.assertEqual(raised.exception.code, "name_generation_failed")
+            self.assertEqual(generate.call_count, 10)
+        with patch.object(module.uuid, "uuid4") as generate:
+            self.assertEqual(module.choose_name("worker", None, set()), "worker")
+            with self.assertRaises(module.LaunchUnavailable) as raised:
+                module.choose_name("worker", None, {"worker"})
+            self.assertEqual(raised.exception.code, "name_exists")
+            generate.assert_not_called()
+        self.assertEqual(len(module.choose_name(None, "x" * 115, set())), 128)
+
+    def test_prefix_and_exact_name_are_exclusive_and_prefix_is_bounded(self):
+        for naming in ([], ["--name", "worker", "--name-prefix", "worker"]):
+            with self.subTest(naming=naming):
+                result, calls = self.run_launcher([], naming=naming)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(calls, [])
+        for prefix in ("", "bad name", "x" * 116):
+            with self.subTest(prefix=prefix):
+                result, calls = self.run_launcher(
+                    [], naming=["--name-prefix", prefix])
+                self.assert_failure(result, "input")
+                self.assertEqual(calls, [])
+
+    def test_unicode_startup_is_readable_without_changing_its_content(self):
+        text = "─" * 100 + "\nπ · Café — vérifier ✅\n"
+        steps = self.happy_steps()
+        steps[-1] = self.read(text)
+        result, _ = self.run_launcher(steps)
+        data = self.assert_success(result)
+        self.assertEqual(data["startup"], text)
+        self.assertIn("─" * 100, result.stdout)
+        self.assertIn("π · Café", result.stdout)
+        self.assertNotIn("\\u2500", result.stdout)
+        self.assertLess(len(result.stdout), len(json.dumps(data)))
 
     def test_unusual_existing_names_do_not_block_a_distinct_fresh_name(self):
         steps = self.happy_steps()
@@ -360,17 +465,23 @@ class LaunchAgentTests(unittest.TestCase):
         ]
         for kind, native in profiles:
             with self.subTest(kind=kind):
-                steps = self.happy_steps()
-                agent = {**self.agent, "agent": kind, "agent_session": {
-                    **self.agent["agent_session"], "agent": kind}}
+                prefix = "astra-review" if kind == "pi" else "fable-review"
+                steps = self.prefix_steps()
+                agent = {**self.agent, "name": "$GENERATED_NAME", "agent": kind,
+                         "agent_session": {**self.agent["agent_session"], "agent": kind}}
                 steps[-2] = step([
-                    "agent", "start", "worker", "--kind", kind,
+                    "agent", "start", "$GENERATED_NAME", "--kind", kind,
                     "--pane", "w2:p1", "--timeout", "30000", "--", *native,
                 ], response("agent_started", agent=agent))
                 result, calls = self.run_launcher(
-                    steps, ["--kind", kind, "--", *native])
-                self.assertEqual(self.assert_success(result)["kind"], kind)
-                self.assertEqual(calls, [item["args"] for item in steps])
+                    steps, ["--kind", kind, "--", *native],
+                    naming=["--name-prefix", prefix])
+                data = self.assert_success(result)
+                self.assertEqual(data["kind"], kind)
+                self.assertRegex(data["name"], f"^{prefix}-[0-9a-f]{{12}}$")
+                expected = json.loads(json.dumps(steps).replace(
+                    "$GENERATED_NAME", data["name"]))
+                self.assertEqual(calls, [item["args"] for item in expected])
                 self.assertEqual(calls[-2][-len(native):], native)
 
     def test_startup_warnings_and_drafts_are_returned_for_judgment(self):

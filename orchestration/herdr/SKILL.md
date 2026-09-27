@@ -25,18 +25,24 @@ be inside a Herdr pane.
 ## Fresh Launch
 
 Set `herdr_dir` to the absolute directory containing **this loaded SKILL.md**.
-Prefer the Python 3 standard-library launcher; choose a unique name and Kyle's
-requested kind (otherwise an appropriate installed integration):
+Prefer the Python 3 standard-library launcher; choose a short name prefix and
+Kyle's requested kind (otherwise an appropriate installed integration):
 
 ```bash
 python3 "$herdr_dir/scripts/launch-agent.py" \
-  --cwd /absolute/repo/path --name task-name --kind pi
+  --cwd /absolute/repo/path --name-prefix task-name --kind pi
 ```
 
 It matches live directories, creates one unfocused tab or workspace root, starts
 once, and returns compact metadata plus startup text. Optional `--workspace`
 verifies a discovered workspace; `--timeout` sets startup milliseconds
-(default 30000, maximum 300000).
+(default 30000, maximum 300000). Use the returned `name`, including its generated
+suffix, for all subsequent commands. Use `--name` instead only for an exact name.
+
+For `code: name_exists` with `mutation_may_have_taken_effect: false`, choose a
+prefix or another name without reading recovery instructions. If Kyle required
+that exact name, ask instead. Other nonmutating preflight errors need their cause
+resolved, not resource recovery. Missing output is never proof of no mutation.
 
 Forward requested model and reasoning settings after `--`, using native flags:
 
@@ -54,7 +60,7 @@ Empty/truncated startup needs targeted inspection; never submit blindly.
 
 Read [manual launch and recovery](references/manual-launch.md) before named
 personas, unfamiliar kinds/native arguments, manual launches, ambiguity, or
-failures. Direct Herdr remains supported; never rerun the helper blindly.
+possibly-mutating failures. Direct Herdr remains supported; never rerun blindly.
 
 ## Prompt and Wait
 

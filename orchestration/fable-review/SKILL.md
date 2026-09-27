@@ -44,7 +44,7 @@ inspection/tests.
    Do not print credentials.
 
    Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
-   review skill. Choose a unique name and start one **fresh** Claude conversation.
+   review skill. Use the `fable-review` name prefix for one **fresh** conversation.
    The helper discovers the workspace and creates an unfocused tab or workspace
    root; do not repeat that discovery/creation manually. Never reuse an existing
    conversation:
@@ -52,7 +52,7 @@ inspection/tests.
    ```bash
    python3 "$herdr_dir/scripts/launch-agent.py" \
      --cwd "<absolute repository/worktree path>" \
-     --name <unique-name> --kind claude -- \
+     --name-prefix fable-review --kind claude -- \
      --model fable --effort high --disallowed-tools Edit,Write,NotebookEdit
    ```
 
@@ -64,7 +64,8 @@ inspection/tests.
    metadata is not a new gate. Do not revalidate transcript metadata after
    submission. Never bypass Claude permissions. Tool exclusions are defense in
    depth, not a Bash security boundary.
-4. Set `agent_name` to the launched agent's name. Add step 2's scope below.
+4. Set `agent_name` to the returned `name`, including its generated suffix.
+   Add step 2's scope below.
    Run this directly in Bash, not inside another `sh -c`/`eval` string. The
    quoted heredoc preserves prompt text literally. Avoid `$(...)` around the
    heredoc: macOS Bash 3.2 can misparse embedded quotes there. `read` returns
