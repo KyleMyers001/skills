@@ -84,9 +84,14 @@ requirement. Show the filename as inline code, not a link or full path.
 
 ### Approval and Checkout
 
-Bind Kyle's approval and execution permission to the exact plan revision and
-content digest. They may arrive in separate messages. “Approved” alone is not
-permission to implement. Missing or ambiguous permission means ask and stop.
+Follow planning's
+[Approval & Execution](../../../planning/SKILL.md#approval--execution) contract:
+unqualified approval authorizes the designated developer to implement; no second
+“proceed” is needed. Preserve holds and handoff restrictions. Bind Kyle's wording
+and source to the exact plan revision and content digest in the orchestration log
+before delegation. Keep approval/status and ownership notes in that log, not the
+frozen plan; recording approval must not invalidate its digest. Missing or
+conflicting approval/assignment evidence means ask only about that gap and stop.
 
 After authorization, record the evidence before creating target changes. Select
 an authorized feature branch/worktree; preserve unrelated staged, unstaged, and
@@ -97,8 +102,9 @@ approval, not merely a new digest.
 
 ### Developer
 
-Provide the original intent; plan path/revision/digest; approval and execution
-wording/source; checkout/branch/base; evidence/log locations; and delivery owner.
+Provide the original intent; plan path/revision/digest; approval wording/source
+and remaining restrictions; explicit execution assignment; checkout/branch/base;
+evidence/log locations; and delivery owner.
 Require:
 
 - Verify the plan against planning's closed-loop requirements linked above and
@@ -191,8 +197,10 @@ Never overwrite an existing run. Planning before authorization lives in the plan
 and planner session. The orchestration log records:
 
 - State: `awaiting-approval`, `implementing`, `verifying`, `ready-for-review`, or
-  `blocked` with previous phase and exact blocker. A revision returns to approval.
-- Plan path/revision/digest, approval and execution wording/date/source/session.
+  `blocked` with previous phase and exact blocker. A material plan revision
+  returns to approval; administrative log updates do not.
+- Plan path/revision/digest, approval wording/date/source/session, remaining
+  restrictions, and execution assignment.
 - Absolute checkout, branch/base, baseline HEAD, agent names/pane/session IDs,
   actual models/reasoning, current write owner, and pending prompts.
 - Developer log/evidence paths, handoff HEAD, run ID, pipeline/final HEAD, PR,
@@ -203,8 +211,10 @@ and planner session. The orchestration log records:
 
 On resume, read both logs and reconcile the plan, approval, agents, branch HEAD,
 AXI outcome/custody, and interrupted attempts before acting. Missing state or
-ambiguous permission/ownership means stop and ask. A stale handoff cannot start
-another pipeline; a changed plan cannot inherit earlier approval.
+ambiguous permission/ownership means stop and ask about the specific gap; intact
+approval and ownership evidence needs no repeated human gate. A stale handoff
+cannot start another pipeline. Investigate a digest mismatch rather than simply
+replacing the digest; material plan changes cannot inherit earlier approval.
 
 Escalate external access/environment blockers immediately and exhausted budgets
 with remaining work. Bound waits and report liveness uncertainty rather than
@@ -222,9 +232,17 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Any selected orchestrator model/reasoning, including a mid-run change,
   continues without a model-switch prompt, fresh approval, or restart. Planner
   and developer profiles remain pinned and verified.
-- Approval without execution permission produces no target tests/code; revised
-  plans return to approval. Missing worker models/prerequisites block, not
-  substitute.
+- No approval means no target tests/code. Unqualified “approved” dispatches the
+  designated developer without a second permission prompt; the planner remains
+  planner-only. “Approve and proceed” remains valid authorization too.
+- “Approved, but hold,” review-only approval, or “I'll hand this off” prevents
+  automatic dispatch. Receiving agents preserve restrictions, including those
+  in historical approvals. An approved artifact alone is not assignment.
+- An assigned developer with valid inherited approval starts without reapproval.
+  Approval/ownership log updates preserve the plan's revision and digest.
+  Material revisions or unresolved conditional approval return to Kyle; missing
+  approval evidence or conflicting ownership blocks only that unresolved gate.
+- Missing worker models/prerequisites block, not substitute.
 - Developer writes all planned tests first and hands off a verified commit
   without publication. Standalone closed-loop still pushes a feature-branch PR.
 - Ask-user/unsafe-operation gates reach Kyle; only the pipeline writes while it

@@ -11,8 +11,8 @@ metadata:
 # Planning
 
 Apply this skill when planning is requested or the selected workflow requires it;
-it does not require a plan for ordinary development edits. During a planning task,
-create the plan only; wait for Kyle to authorize implementation.
+it does not require a plan for ordinary development edits. Initially create only
+the plan; after approval, follow [Approval & Execution](#approval--execution).
 
 ## Workflow
 
@@ -80,12 +80,42 @@ create the plan only; wait for Kyle to authorize implementation.
 - Do not invent missing context. Record material unknowns or ask before
   finalizing.
 
+## Approval & Execution
+
+Unqualified approval of the current plan (such as “approved”) authorizes in-scope
+implementation. “Approve and proceed” or “implement this plan” also suffices;
+no magic wording is required. Read the entire approved revision, including
+Execution Details, and continue without asking for a separate “proceed.”
+
+The current agent implements by default. An initial request to create a plan is
+not a permanent planner-only role. Explicit restrictions and established roles
+still control execution:
+
+- Approval qualified by “hold” or “review only”: preserve the restriction and
+  stop. Do not reinterpret historical review-only approvals as authorization.
+- “I'll hand this off”: prepare the handoff, but do not implement or launch
+  anyone. Ask only if execution ownership is genuinely unresolved.
+- Delegated planner-only worker: return to the coordinator, not implementation.
+  An orchestrator continues by assigning its designated developer.
+
+Approval is not assignment. A receiving implementer must be assigned the work
+and receive the full plan, Kyle's approval wording/source, plan path/revision,
+and remaining restrictions/ownership context. Reuse existing metadata, handoff,
+or workflow logs; no new artifact is required for ordinary same-session work.
+A bare `Status: Approved` or finding a plan is insufficient evidence to start.
+With valid inherited approval and unchanged scope, proceed without another gate.
+Reconcile relevant checkout drift; ask only about missing or conflicting evidence.
+
+Conditional approval with unresolved material changes requires resolution and
+approval of the resulting revision. Approval does not activate opt-in workflows,
+authorize unrequested delegation, or waive global safety and PR rules.
+
 ## Revisions
 
-Read the current plan immediately before editing. Keep its filename and work ID,
-increment `Revision`, and update `Updated`. Incorporate feedback into the
-Markdown source under `~/Workbench/Plans/` only.
-
-Approval covers the entire revision, including Execution Details; executing
-agents must read the whole plan. Revisions require fresh approval. Plan approval
-alone does not authorize implementation; Kyle must also say to proceed.
+Read the current plan immediately before editing. Keep its filename and work ID;
+incorporate feedback into the Markdown source under `~/Workbench/Plans/` only.
+Material scope, acceptance, approach, or verification changes require incrementing
+`Revision`, updating `Updated`, and fresh approval. Formatting, approval/status
+notes, and ownership transfers do not change the substantive revision or require
+reapproval. Keep administrative records outside a plan frozen by a workflow's
+content digest; never alter approved content merely to record its approval.

@@ -8,6 +8,12 @@
 - **Revision:** 1
 - **Updated:** YYYY-MM-DD
 
+For handoffs, preserve approval wording/source, plan path/revision, and any
+execution-owner or hold instructions in existing metadata, the handoff, or the
+workflow log. Omit unused fields; do not ask for an owner when the default is
+clear. Follow [Approval & Execution](../SKILL.md#approval--execution); recording
+approval is not a substantive revision. Keep records outside a digest-bound plan.
+
 ## Context & Goal
 
 - **Problem:** {Current behavior and why it needs to change.}

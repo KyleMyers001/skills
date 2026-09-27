@@ -49,8 +49,10 @@ approval or restart.
    delivery owner. Inspect the actual plan and completion evidence; idle is not
    success.
 3. **Human gate:** present the Markdown filename in inline code, revision,
-   choices, and blockers. Stop for approval **and** execution permission tied
-   to that revision. Approval alone does not permit target edits. Revisions
+   choices, and blockers. Stop for approval under planning's
+   [Approval & Execution](../../planning/SKILL.md#approval--execution) contract.
+   Unqualified approval authorizes dispatching the developer without another
+   “proceed”; preserve explicit holds and handoff instructions. Material revisions
    require fresh approval; do not approve on Kyle's behalf.
 4. **Implement:** after authorization, create/resume durable state and establish
    a feature branch/worktree without disturbing unrelated work. Delegate the

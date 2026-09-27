@@ -12,8 +12,8 @@ metadata:
 
 # Closed-Loop Development
 
-**Opt-in only** — explicit closed-loop language or manual invoke; plan approval
-alone is not enough.
+**Opt-in only** — explicit closed-loop language or manual invoke; approving a
+plan does not select this workflow.
 
 Use the current agent; no subagents or external reviewers unless requested.
 Load `planning` and `developer` as needed.
@@ -43,17 +43,18 @@ Before modifying the target:
 3. Use `planning` to create and lint a plan satisfying its
    [closed-loop plan requirements](../planning/references/closed-loop-plan.md).
    Read the entire plan before execution, including execution details.
-4. Present path, decisions, verification, and blockers. Ask for approval **and
-   authorization to execute**, then stop. “Approve and proceed” grants both;
-   silence or review-only approval does not. Write no target tests or code yet.
+4. Present the plan using planning's output format and stop for approval; write
+   no target tests or code yet. Follow its
+   [Approval & Execution](../planning/SKILL.md#approval--execution) contract:
+   unqualified approval authorizes execution without a separate “proceed.”
+   Preserve explicit holds, review-only instructions, and execution ownership.
 
-For an already approved plan with explicit execution authorization, confirm it
-still fits planning's closed-loop requirements or applicable explicit exceptions.
+For an already approved plan assigned for execution, validate inherited approval
+for its exact revision/content and confirm it still fits planning's closed-loop
+requirements or applicable explicit exceptions. Delegation alone is not approval.
 Validate by content, not heading names; revise and seek fresh approval for actual
-missing requirements, not formatting preferences. A delegated agent may validate
-recorded approval and execution permission for the exact plan revision/content;
-delegation alone is not permission. Material scope, acceptance, approach, or
-verification changes always require renewed approval.
+missing requirements, not formatting preferences. Material scope, acceptance,
+approach, or verification changes always require renewed approval.
 
 ## Durable State
 
@@ -62,8 +63,9 @@ After authorization, before target changes, create/resume
 screenshots/evidence in sibling `<plan-id>-evidence/`, outside the target.
 Do not overwrite an existing run or evidence. Maintain:
 
-- Approval wording, date, source/session, plan path/revision, absolute target,
-  and branch/checkout identity when applicable.
+- Approval wording, date, source/session, plan path/revision, execution owner,
+  remaining restrictions, absolute target, and branch/checkout identity when
+  applicable.
 - Baselines, checkpoints, acceptance evidence, exact commands/results, and
   artifact paths, with sensitive output sanitized.
 - Approved budget, total attempts used, consecutive no-progress attempts on the
@@ -73,8 +75,9 @@ Do not overwrite an existing run or evidence. Maintain:
   attempts stay counted; their outcome is unknown until verified.
 
 Appending execution facts is not a plan revision and cannot change approval or
-scope. On resume, reconcile the log, plan, current work, and pending attempts;
-confirm authorization still applies.
+scope. On resume, reconcile the log, plan, ownership, current work, and pending
+attempts. Confirm authorization still applies; reuse valid approval without
+asking Kyle to repeat it.
 If the log is missing or approval/counts ambiguous, stop and ask; never guess
 or reset. Rerun checks as needed for current-code evidence.
 
