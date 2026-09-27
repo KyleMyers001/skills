@@ -1,6 +1,9 @@
 # Agent skills
 
-A collection of reusable `SKILL.md` instructions for coding agents. Each skill defines when to use a workflow and how to carry it out. Some are general-purpose; others assume Kyle's local tools, accounts, or directory layout. Read a skill's requirements before using it elsewhere.
+A collection of reusable `SKILL.md` instructions for coding agents. Each skill
+defines when to use a workflow and how to carry it out. Some are general-purpose;
+others assume Kyle's local tools, accounts, or directory layout. Read a skill's
+requirements before using it elsewhere.
 
 ## Skills
 
@@ -25,13 +28,30 @@ A collection of reusable `SKILL.md` instructions for coding agents. Each skill d
 
 ## Using a skill
 
-Each skill lives in its own directory with a `SKILL.md` containing a name, description, and instructions. Some also include `references/` files used by the workflow. Place the **whole directory** in a location your agent scans for skills; consult your agent's documentation for its discovery and invocation rules. For example, if your agent scans `~/.agents/skills`, you can link a skill from this checkout:
+Each skill lives in its own directory with a `SKILL.md` containing a name,
+description, and instructions. Some also include `references/` files used by the
+workflow. Place the **whole directory** in a location your agent scans for skills;
+consult your agent's documentation for its discovery and invocation rules. For
+example, if your agent scans `~/.agents/skills`, you can link a skill from this
+checkout:
 
 ```sh
 mkdir -p ~/.agents/skills
 ln -s "$PWD/developer" ~/.agents/skills/developer
 ```
 
-Run the example from the repository root, and use the individual skill path (for example, `orchestration/herdr`) for nested skills. Don't replace an existing installed skill without checking it first.
+Run the example from the repository root, and use the individual skill path
+(for example, `orchestration/herdr`) for nested skills. Don't replace an existing
+installed skill without checking it first.
 
-These files are instructions, not bundled executables. Tools such as `agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed and configured separately where required. The descriptions in each `SKILL.md` specify when a skill should activate; in particular, opt-in workflows should not be triggered merely because their topic comes up.
+Skills are primarily instructions. Herdr also bundles
+`scripts/extract-response.py`, an optional Python 3 standard-library helper that
+extracts candidate answer text without loading raw transcripts into the
+orchestrator. It does not validate handoffs or launch agents; extraction failures
+use the same agent's terminal response, never an automatic model rerun. Keep the
+whole skill directory when installing it.
+
+Tools such as `agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed
+and configured separately where required. The descriptions in each `SKILL.md`
+specify when a skill should activate; in particular, opt-in workflows should not
+be triggered merely because their topic comes up.

@@ -24,33 +24,36 @@ setup; the controlling shell need not be inside a Herdr pane or have pane-local
 
 ## Discover
 
-Verify access first:
+Verify access and discover only what this task needs:
 
 ```bash
 command -v herdr
 herdr --session Subagents status server
 herdr --session Subagents workspace list
-herdr --session Subagents agent list
-herdr --session Subagents pane list
+herdr --session Subagents pane list --workspace <candidate-workspace-id>
 ```
 
-If unavailable, report it; do not start or target another session. Check
-`herdr --session Subagents agent --help` (also `pane`, `workspace`, or `tab`);
-installed syntax is authoritative. Never run bare `herdr` (it opens the TUI)
-or probe mutating commands by omitting arguments.
-
 Match workspaces by live pane `foreground_cwd`, not labels or display order.
+Use session-wide `pane list` only if scoped discovery cannot resolve the target;
+use `agent list` to locate an unknown agent or choose a unique launch name.
 Inspect ambiguity or ask Kyle. Read runtime IDs/state from JSON; target unique
 stable agent names or discovered pane IDs.
 
+If unavailable, report it; do not start or target another session. Check relevant
+`--help` once per invocation when syntax/capabilities are not already known;
+installed syntax is authoritative. Reuse loaded skills, help, and discovery
+results across agents, but refresh live target state before mutations. Never
+run bare `herdr` (it opens the TUI) or probe mutations by omitting arguments.
+
 ## Inspect, Prompt, Wait
 
-Read the target's state and recent context:
+Before messaging, inspect the target's state and a short recent view. Reuse an
+inspection already performed for this submission; do not repeat it by checklist:
 
 ```bash
 herdr --session Subagents agent get <target>
 herdr --session Subagents agent read <target> \
-  --source recent-unwrapped --lines 200
+  --source recent-unwrapped --lines 80
 ```
 
 Report task, directory, and state (`idle`, `working`, `blocked`, `done`,
@@ -63,10 +66,12 @@ herdr --session Subagents agent prompt <target> "<task>" \
 herdr --session Subagents agent wait <target> --timeout 120000
 ```
 
-Use `wait` for an already-running agent. Prompt/wait normally settle on `idle`,
-`done`, or `blocked`, not proof of successful task completion. After blocking,
-unknown state, timeout, or stalled submission, inspect `get` and `read` before
-retrying or sending keys. Do not assume receipt or completion.
+Use `wait` for an already-running agent, not repeated reads of unchanged history.
+Prompt/wait normally settle on `idle`, `done`, or `blocked`, not proof of successful
+completion. After blocking, unknown state, timeout, or stalled submission,
+inspect `get` and a short `read` before retrying or sending keys. Do not assume
+receipt or completion. After a normal wait, go directly to Return Output; a
+second full terminal read is not required.
 
 ### Submission Recovery
 
@@ -100,11 +105,15 @@ herdr --session Subagents workspace create \
   --cwd <repo-path> --label <repo-name> --no-focus
 ```
 
-Parse the returned pane ID, choose a short unique name, then start and prompt:
+Parse the returned pane ID and choose a short unique name. Start, perform the
+short pre-prompt inspection above for directory/startup errors, then prompt:
 
 ```bash
 herdr --session Subagents agent start <agent-name> \
   --kind pi --pane <returned-pane-id>
+herdr --session Subagents agent get <agent-name>
+herdr --session Subagents agent read <agent-name> \
+  --source recent-unwrapped --lines 80
 herdr --session Subagents agent prompt <agent-name> \
   "<sender, task, scope, constraints, expected response>" --wait --timeout 120000
 ```
@@ -129,10 +138,10 @@ an unnamed or substitute persona. When Pi displays loaded context, inspect it
 for the persona file before prompting; a visible contradiction requires Kyle's
 decision.
 
-Use Kyle's requested kind, or an appropriate installed integration; check
-`agent start --help` before choosing kinds/native arguments. Do not add blanket
-approval bypasses. Include repository/global safety and branch/worktree/PR
-constraints in every delegated prompt.
+Use Kyle's requested kind, or an appropriate installed integration; consult
+`agent start --help` before choosing unfamiliar kinds/native arguments. Do not
+add blanket approval bypasses. Include repository/global safety and
+branch/worktree/PR constraints in every delegated prompt.
 
 A delegated prompt reaches the child looking like a message from Kyle. Open
 every one by stating that the sender is an orchestrating agent working on
@@ -149,22 +158,58 @@ is explicitly marked blocked/unavailable.
 
 ## Return Output
 
-Return the completed response from the agent that received the task. Prefer
-original text from its persisted session when readily available; for Pi,
-`result.agent.agent_session.value` from `agent get` normally identifies the
-JSONL file. Extract the relevant final report's text blocks, not thinking or
-tool output. Idle alone is inconclusive; inspect the report and genuine errors.
-Do not gate delivery on exact prompt matches, metadata, or stop-marker schemas.
+Return the response from the agent that received the task. Use one retrieval
+route, not terminal output followed by a second full transcript copy. If the
+completed report is already visible, return it; original-byte fidelity is not
+an extra gate.
 
-If persisted output is unavailable or its format changes, return the visible
-report via `agent read`, disclosing that it is terminal-rendered rather than
-byte-for-byte original text. Increase `--lines` for missing history. Label any
-remaining truncation or uncertainty; never invent missing text or claim a
-partial report is complete. Never expose secrets.
+**Never read raw child JSONL into model context**, including `read`, `cat`,
+`tail`, or paging after truncation. Parse locally and emit only answer text,
+not thinking, tools, prompts, or metadata.
 
-Bookkeeping failures must not suppress a completed report. Without Kyle's
-explicit approval, do not restart, re-prompt, launch another agent, or ask it to
-copy/regenerate output to repair retrieval.
+### Extract First When Mapped
+
+Use the same agent's `get` for state and `result.agent.agent_session`. For Pi,
+its `value` normally identifies the JSONL path. For Claude, a `path` value is
+the file; an `id` can locate the exact `<id>.jsonl` under `~/.claude/projects/`.
+Search filenames for that ID only, not transcript contents. Missing/ambiguous
+mapping is a reason to use terminal fallback, not guess another session.
+
+Set `herdr_dir` to the absolute directory containing **this loaded SKILL.md**,
+`session_path` to the mapped file, and `kind` to `pi` or `claude`:
+
+```bash
+python3 "$herdr_dir/scripts/extract-response.py" \
+  --kind "$kind" "$session_path"
+```
+
+The bundled [Python 3 helper](scripts/extract-response.py) selects the last
+assistant text, preserving text blocks and Claude records sharing its message
+ID. It is **not a validator**:
+no required report format, exact prompt, model metadata, or stop marker.
+Success returns a candidate, not proof of completion or task ownership. Judge
+the response and genuine errors alongside the known state; idle alone is not
+proof. For reused/branched sessions with unclear task association, use terminal
+fallback instead. For work still running without a completed response, wait.
+Do not read the full terminal report again after successful extraction.
+
+### Terminal Fallback, Not Model Retry
+
+If Python/helper access, parsing, or format changes prevent extraction, return
+the same agent's available terminal report. Start with the same target's
+`agent read <target> --source recent-unwrapped --lines 80` (include
+`--session Subagents`); normally expand once to cover missing history.
+Further diagnostic reads need new evidence or an explicit investigation, not
+unchanged polling. This bounds diagnostics, not the report: preserve the full
+answer when available, paginate **extracted text only** if tool limits truncate
+it, and label any remaining partial output or uncertainty. Disclose terminal
+rendering rather than claiming byte-for-byte original text. Never expose secrets.
+
+Extraction/bookkeeping failures must not suppress an accessible report or become
+handoff gates. Do not add a validator to compensate for parser uncertainty.
+Without Kyle's explicit approval, never restart, re-prompt, launch another
+agent, or ask it to copy/regenerate output to repair retrieval. If no response
+is accessible, say so; do not spend more model tokens recovering it.
 
 ## Pane Fallback
 
@@ -176,8 +221,8 @@ herdr --session Subagents pane run <pane-id> "pnpm test"
 herdr --session Subagents pane wait-output <pane-id> \
   --match "Tests" --timeout 120000
 herdr --session Subagents pane read <pane-id> \
-  --source recent-unwrapped --lines 200
+  --source recent-unwrapped --lines 80
 ```
 
-For missing history, try a larger terminal read or the same agent's persisted
-output; disclose any remaining gaps without regenerating the task.
+Apply the same bounded fallback above for missing history; disclose remaining
+gaps without regenerating the task.
