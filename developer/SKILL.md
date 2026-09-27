@@ -11,6 +11,19 @@ description: >-
 Optimize for code another developer can understand and safely change. Explicit
 requirements and project conventions take precedence over these preferences.
 
+When editing or reviewing code, read only the matching local guide:
+
+- TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`):
+  [TypeScript](references/typescript.md), not the JavaScript guide.
+- JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`):
+  [JavaScript](references/javascript.md).
+- Python (`.py`, `.pyi`): [Python](references/python.md).
+
+For mixed-language work, read one guide per language involved; for other
+languages, read none. External source links are citations, not reading
+instructions: do not fetch them for normal coding work. Consult one only if
+the user explicitly requests source verification or strict compliance.
+
 ## Implementation
 
 - Read relevant instructions, code, callers, and tests before editing. Confirm
@@ -26,8 +39,7 @@ requirements and project conventions take precedence over these preferences.
 - Use descriptive domain names and explicit inputs, outputs, and dependencies.
   Avoid hidden mutable state and surprising effects. Use guard clauses where
   helpful, not unnecessary one-line helpers.
-- Model valid states with types. In TypeScript, prefer narrowing and `unknown`
-  over `any`, unchecked casts, and non-null assertions.
+- Model valid states with types.
 - Validate untrusted input at boundaries; handle errors and async failures
   explicitly. Do not swallow failures or hide defects behind defaults. Release
   resources and keep sensitive data out of code, logs, fixtures, and reports.
