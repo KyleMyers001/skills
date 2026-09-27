@@ -94,9 +94,11 @@ still control execution:
 - Approval qualified by “hold” or “review only”: preserve the restriction and
   stop. Do not reinterpret historical review-only approvals as authorization.
 - “I'll hand this off”: prepare the handoff, but do not implement or launch
-  anyone. Ask only if execution ownership is genuinely unresolved.
+  anyone.
 - Delegated planner-only worker: return to the coordinator, not implementation.
   An orchestrator continues by assigning its designated developer.
+- Genuinely unresolved ownership (such as “maybe I'll hand this off”): ask one
+  focused question.
 
 Approval is not assignment. A receiving implementer must be assigned the work
 and receive the full plan, Kyle's approval wording/source, plan path/revision,
