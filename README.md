@@ -49,8 +49,9 @@ standard-library helpers:
 
 - `scripts/launch-agent.py` discovers a workspace and starts one fresh agent,
   returning compact metadata and startup context for inspection before prompting.
-  It never submits tasks, retries mutations, or cleans up resources. Direct
-  Herdr commands remain supported for existing agents and unusual launches.
+  It handles a freshly created shell's proven pre-input busy rejection with a
+  bounded wait. It never submits tasks, retries uncertain mutations, or cleans
+  up resources. Direct Herdr remains supported for existing/unusual launches.
 - `scripts/extract-response.py` extracts candidate answer text without loading
   raw transcripts into the orchestrator. It does not validate handoffs or launch
   agents; extraction failures use the same agent's terminal response, never an

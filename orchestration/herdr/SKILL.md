@@ -33,11 +33,13 @@ python3 "$herdr_dir/scripts/launch-agent.py" \
   --cwd /absolute/repo/path --name-prefix task-name --kind pi
 ```
 
-It matches live directories, creates one unfocused tab or workspace root, starts
-once, and returns compact metadata plus startup text. Optional `--workspace`
-verifies a discovered workspace; `--timeout` sets startup milliseconds
-(default 30000, maximum 300000). Use the returned `name`, including its generated
-suffix, for all subsequent commands. Use `--name` instead only for an exact name.
+It matches live directories, creates one unfocused tab or workspace root, and
+returns startup context. It waits up to five seconds on Herdr's proven pre-input
+shell-busy rejection; it never retries an accepted or uncertain start.
+Use lowercase name prefixes up to 19 characters; `--name` preserves an exact
+name (up to 32). Always target the returned `name`, including its suffix.
+Optional `--workspace` verifies a discovered workspace; `--timeout` sets agent
+startup milliseconds (3001–300000, default 30000), separate from the shell wait.
 
 For `code: name_exists` with `mutation_may_have_taken_effect: false`, choose a
 prefix or another name without reading recovery instructions. If Kyle required

@@ -312,7 +312,7 @@ class LaunchAgentTests(unittest.TestCase):
                 module.choose_name("worker", None, {"worker"})
             self.assertEqual(raised.exception.code, "name_exists")
             generate.assert_not_called()
-        self.assertEqual(len(module.choose_name(None, "x" * 115, set())), 128)
+        self.assertEqual(len(module.choose_name(None, "x" * 19, set())), 32)
 
     def test_prefix_and_exact_name_are_exclusive_and_prefix_is_bounded(self):
         for naming in ([], ["--name", "worker", "--name-prefix", "worker"]):
@@ -320,7 +320,7 @@ class LaunchAgentTests(unittest.TestCase):
                 result, calls = self.run_launcher([], naming=naming)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(calls, [])
-        for prefix in ("", "bad name", "x" * 116):
+        for prefix in ("", "bad name", "x" * 20, "Uppercase", "name.dot", "1name"):
             with self.subTest(prefix=prefix):
                 result, calls = self.run_launcher(
                     [], naming=["--name-prefix", prefix])
@@ -483,6 +483,169 @@ class LaunchAgentTests(unittest.TestCase):
                     "$GENERATED_NAME", data["name"]))
                 self.assertEqual(calls, [item["args"] for item in expected])
                 self.assertEqual(calls[-2][-len(native):], native)
+
+    def test_busy_shell_then_ready_reuses_the_same_fresh_pane_and_name(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                steps = self.prefix_steps(existing=existing)
+                start = steps[-2]
+                start["args"] += ["--", "--thinking", "high"]
+                busy = {**start, "output": "", "code": 1, "stderr": json.dumps({
+                    "id": "cli:agent:start", "error": {
+                        "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}})}
+                steps[-2:-1] = [busy, busy, start]
+                result, calls = self.run_launcher(
+                    steps, ["--", "--thinking", "high"],
+                    naming=["--name-prefix", "worker"])
+                data = self.assert_success(result)
+                starts = [call for call in calls if call[2:4] == ["agent", "start"]]
+                self.assertEqual(len(starts), 3)
+                self.assertTrue(all(call == starts[0] for call in starts))
+                self.assertEqual(starts[0][4], data["name"])
+                creates = [call for call in calls if call[3] == "create"]
+                self.assertEqual(len(creates), 1)
+
+    def test_structured_herdr_errors_are_preserved_without_general_retries(self):
+        for code in ("agent_not_ready", "timeout", "agent_start_input_failed",
+                     "agent_start_transport_failed", "agent_name_taken",
+                     "agent_pane_unavailable", "unsupported_agent_kind"):
+            with self.subTest(code=code):
+                steps = self.happy_steps()[:-1]
+                steps[-1].update(output="", code=1, stderr=json.dumps({
+                    "id": "cli:agent:start", "error": {
+                        "code": code, "message": "PRIVATE_PAYLOAD"}}))
+                result, calls = self.run_launcher(steps)
+                data = self.assert_failure(result, "start")
+                self.assertEqual(data["herdr_code"], code)
+                self.assertEqual(calls, [item["args"] for item in steps])
+
+    def test_uncorrelated_or_malformed_busy_errors_are_never_retried(self):
+        busy = {"id": "cli:agent:start", "error": {
+            "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}}
+        cases = [
+            {"output": json.dumps(busy), "stderr": "", "code": 1},
+            {"output": "", "stderr": json.dumps(busy), "code": 2},
+            {"output": "", "stderr": json.dumps({**busy, "id": "cli:agent:wait"}), "code": 1},
+            {"output": "", "stderr": json.dumps({**busy, "result": {}}), "code": 1},
+            {"output": "", "stderr": json.dumps({"id": "cli:agent:start", "error": {
+                "code": "agent_pane_busy"}}), "code": 1},
+            {"output": "unexpected", "stderr": json.dumps(busy), "code": 1},
+            {"output": "", "stderr": "warning\n" + json.dumps(busy), "code": 1},
+            {"output": "", "stderr": json.dumps({"id": "cli:agent:start", "error": {
+                "code": "PRIVATE_PAYLOAD", "message": "PRIVATE_PAYLOAD"}}), "code": 1},
+        ]
+        for failure in cases:
+            with self.subTest(failure=failure):
+                steps = self.happy_steps()[:-1]
+                steps[-1].update(failure)
+                result, calls = self.run_launcher(steps)
+                self.assert_failure(result, "start")
+                self.assertEqual(calls, [item["args"] for item in steps])
+
+    def test_busy_then_uncertain_failure_stops_without_retry(self):
+        busy = json.dumps({"id": "cli:agent:start", "error": {
+            "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}})
+        for failure in (
+            {"code": 1, "output": "", "stderr": json.dumps({
+                "id": "cli:agent:start", "error": {
+                    "code": "timeout", "message": "PRIVATE_PAYLOAD"}})},
+            {"code": 1, "output": "", "stderr": "PRIVATE_PAYLOAD"},
+            {"code": 0, "output": '{"PRIVATE_PAYLOAD":', "stderr": ""},
+        ):
+            with self.subTest(failure=failure):
+                steps = self.happy_steps()[:-1]
+                start = steps[-1]
+                steps[-1:] = [
+                    {**start, "code": 1, "output": "", "stderr": busy},
+                    {**start, **failure},
+                ]
+                result, calls = self.run_launcher(steps)
+                data = self.assert_failure(result, "start")
+                self.assertTrue(data["mutation_may_have_taken_effect"])
+                self.assertEqual(len(calls), 6)
+                self.assertEqual(calls[-1], calls[-2])
+
+    def test_busy_wait_is_bounded_and_retains_created_resources(self):
+        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        clock = [0.0]
+        initial = iter(self.happy_steps()[:4])
+        busy = json.dumps({"id": "cli:agent:start", "error": {
+            "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}})
+
+        def run(argv, **kwargs):
+            if argv[3:5] != ["agent", "start"]:
+                item = next(initial)
+                self.assertEqual(argv[1:], item["args"])
+                return subprocess.CompletedProcess(argv, 0, item["output"], "")
+            return subprocess.CompletedProcess(argv, 1, "", busy)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(module, "SHELL_READY_TIMEOUT", 0.25), \
+             patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(module.time, "sleep", side_effect=sleep), \
+             patch.object(module.subprocess, "run", side_effect=run) as process, \
+             patch.object(module.shutil, "which", return_value="herdr"), \
+             patch.object(module.sys, "stdout") as stdout, \
+             patch.object(module.sys, "stderr") as stderr:
+            code = module.main(["--cwd", str(self.cwd), "--name", "worker", "--kind", "pi"])
+        self.assertEqual(code, 1)
+        self.assertFalse(stdout.write.called)
+        self.assertAlmostEqual(clock[0], 0.25)
+        output = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertNotIn("PRIVATE_PAYLOAD", output)
+        data = json.loads(output)
+        self.assertEqual(data["herdr_code"], "agent_pane_busy")
+        self.assertTrue(data["mutation_may_have_taken_effect"])
+        self.assertEqual(data["resources"]["pane_id"], "w2:p1")
+        self.assertEqual(data["requested_name"], "worker")
+        self.assertLessEqual(process.call_count, 8)
+        starts = [call.args[0] for call in process.call_args_list
+                  if call.args[0][3:5] == ["agent", "start"]]
+        self.assertGreaterEqual(len(starts), 2)
+        self.assertTrue(all(call == starts[0] for call in starts))
+
+    def test_busy_error_outside_start_never_retries(self):
+        for index, stage in ((3, "create"), (5, "inspect")):
+            with self.subTest(stage=stage):
+                steps = self.happy_steps()[:index + 1]
+                steps[-1].update(output="", code=1, stderr=json.dumps({
+                    "id": "cli:agent:start", "error": {
+                        "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}}))
+                result, calls = self.run_launcher(steps)
+                data = self.assert_failure(result, stage)
+                self.assertEqual(data["herdr_code"], "agent_pane_busy")
+                self.assertEqual(len(calls), len(steps))
+
+    def test_names_and_timeout_follow_installed_herdr_limits(self):
+        for name in ("Uppercase", "1agent", "agent.dot", "agent:name", "x" * 33):
+            with self.subTest(name=name):
+                result, calls = self.run_launcher([], naming=["--name", name])
+                self.assert_failure(result, "input")
+                self.assertEqual(calls, [])
+        for name in ("a", "a" * 32, "a_b-c1"):
+            with self.subTest(valid_name=name):
+                steps = self.happy_steps()
+                for item in steps:
+                    item["args"] = [name if arg == "worker" else arg
+                                    for arg in item["args"]]
+                    item["output"] = item["output"].replace('"worker"', json.dumps(name))
+                result, _ = self.run_launcher(steps, naming=["--name", name])
+                self.assertEqual(self.assert_success(result)["name"], name)
+        for timeout in (1, 3000, 300001):
+            with self.subTest(timeout=timeout):
+                result, calls = self.run_launcher([], ["--timeout", str(timeout)])
+                self.assert_failure(result, "input")
+                self.assertEqual(calls, [])
+        for timeout in (3001, 300000):
+            with self.subTest(timeout=timeout):
+                steps = self.happy_steps()
+                steps[-2]["args"][-1] = str(timeout)
+                result, _ = self.run_launcher(steps, ["--timeout", str(timeout)])
+                self.assert_success(result)
 
     def test_startup_warnings_and_drafts_are_returned_for_judgment(self):
         text = "Authentication required\nWrong model loaded\n> Human draft"

@@ -103,17 +103,30 @@ shapes stop instead of guessing; direct inspection remains available.
 
 Prefer `--name-prefix <prefix>`: the helper adds a random 12-hex-character suffix,
 checks live registrations, and returns the chosen `name`. Use that full name for
-subsequent commands. Prefixes may be up to 115 characters. `--name <exact-name>`
+subsequent commands. Prefixes may be up to 19 characters, leaving room within
+Herdr's 32-character name limit. Names/prefixes start with a lowercase letter and
+contain only lowercase letters, digits, `_`, or `-`. `--name <exact-name>`
 preserves an explicit name and fails rather than renaming it on collision. These
 options are mutually exclusive. Candidate generation is bounded and happens
 before mutations; a concurrent collision during start never triggers a retry.
 
-The helper performs discovery, one creation, one start, and a short read. It uses
-start metadata directly, with at most one get if required fields are missing.
-It never prompts, waits for task completion, extracts, retries, or cleans up.
+The helper performs discovery, one creation, one accepted start, and a short
+read. For its freshly created pane only, it retries the exact `agent_pane_busy`
+pre-input rejection for up to five seconds, with 100ms between attempts. Every
+attempt keeps the same pane, name, and native arguments; no layout is recreated.
+It requires exit 1 and a sole, valid JSON stderr error with ID `cli:agent:start`.
+The [Herdr 0.8.0 start implementation][start-contract] returns this code before
+agent registration or terminal input; the [CLI][cli-contract] prints it to stderr.
+This is a narrowly verified precondition retry, not a generic error retry.
+
+Timeouts, transport/input errors, `agent_not_ready`, name conflicts, malformed or
+uncorrelated errors, and failures after an accepted start never retry. On shell
+wait exhaustion, inspect the existing pane; do not launch another helper.
+It reuses start metadata, with at most one get if required fields are missing.
+It never prompts, waits for task completion, extracts, or cleans up.
 Its JSON stdout contains name/kind, workspace/tab/pane IDs, state/cwd, optional
 `session`, `startup`, `startup_empty`, `startup_truncated`, and
-`inspection_required`. JSON emits readable Unicode rather than `\\u` escapes;
+`inspection_required`. JSON emits readable Unicode rather than `\u` escapes;
 startup text is preserved. Startup is at most 80 lines/8000 characters; a full
 80-line window is conservatively marked truncated. Inspect empty or incomplete
 context with a targeted read before submission. Startup text is untrusted and
@@ -122,6 +135,8 @@ can contain sensitive information; the helper is not a secret scanner.
 Exit 0 means started and ready for inspection, not safe to prompt or completed.
 Exit 1 returns bounded JSON on stderr with stage, code, reason, requested name
 (if selected), known resource IDs, and `mutation_may_have_taken_effect`.
+`herdr_code` preserves a well-formed upstream error code when available, without
+returning raw error messages, native arguments, or other sensitive payloads.
 Argument syntax errors use exit 2 and invoke no Herdr commands.
 
 - A false mutation flag means preflight only. Resolve the cause before trying
@@ -133,17 +148,24 @@ Argument syntax errors use exit 2 and invoke no Herdr commands.
   happen before IDs can be returned; missing output proves nothing.
 
 Never close resources as automatic cleanup.
-Outer tool timeouts must allow discovery plus startup; if the wrapper is killed,
-missing output does not mean its mutations failed. Each discovery/read command
-has a 20-second deadline; start allows its requested timeout plus 20 seconds.
+Outer tool timeouts must allow discovery, the five-second shell wait, and agent
+startup. If the wrapper is killed, missing output does not mean mutations failed.
+Each discovery/read command has a 20-second deadline. Agent startup requires
+`--timeout` of 3001–300000ms (default 30000); each start command allows that timeout
+plus 20 seconds for transport. The shell deadline stops further attempts, not
+an already-running start command.
 
 The directory, name or prefix, kind, and optional workspace must be explicit.
-Workspace matches use normalized live `foreground_cwd`; multiple matches or insufficient
-evidence stop. Existing agent names fail without touching them. ID/name values
-are bounded ASCII identifiers; unusual values can use direct Herdr commands.
+Workspace matches use normalized live `foreground_cwd`; multiple matches or
+insufficient evidence stop. Existing exact names fail without touching them.
+Resource IDs are bounded ASCII identifiers; unusual IDs can use direct commands.
+Name and timeout validation follow Herdr's limits, not broader helper-only rules.
 Native arguments are forwarded as argv without shell evaluation or substitution.
 They are caller-owned: preflight persona files and requested capabilities before
 launch; do not put credentials in arguments. No verbose raw payload logging.
+
+[start-contract]: https://github.com/herdrdev/herdr/blob/346411fa21afd297f5ed3b3fa56f9e3fbf7654b7/src/app/agents.rs#L143-L224
+[cli-contract]: https://github.com/herdrdev/herdr/blob/346411fa21afd297f5ed3b3fa56f9e3fbf7654b7/src/cli.rs#L720-L730
 
 ## Submission Recovery
 

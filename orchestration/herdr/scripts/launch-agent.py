@@ -12,10 +12,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 
 COMMAND_TIMEOUT = 20
+SHELL_READY_TIMEOUT = 5
+SHELL_POLL_INTERVAL = 0.1
+AGENT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
+ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 STARTUP_LINES = 80
 STARTUP_CHARACTERS = 8000
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
@@ -27,6 +32,39 @@ class LaunchUnavailable(Exception):
     def __init__(self, message, code="launch_unavailable"):
         super().__init__(message)
         self.code = code
+
+
+class HerdrFailure(LaunchUnavailable):
+    def __init__(self, code, pre_start_busy=False):
+        super().__init__("Herdr command failed; inspect the known target.", "herdr_error")
+        self.herdr_code = code
+        self.pre_start_busy = pre_start_busy
+
+
+def herdr_failure(result):
+    """Keep only a bounded code, never upstream messages, argv, or raw output."""
+    code, pre_start_busy = None, False
+    outputs = [value.strip() for value in (result.stdout, result.stderr)
+               if value.strip()]
+    if len(outputs) == 1:
+        try:
+            data = json.loads(outputs[0])
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, dict) and "result" not in data:
+            error = data.get("error")
+            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                if ERROR_CODE.fullmatch(error["code"]):
+                    code = error["code"]
+                # v0.8.0 emits this exact stderr envelope before registering an
+                # agent or writing input. Never infer it from error prose.
+                pre_start_busy = (
+                    code == "agent_pane_busy" and result.returncode == 1
+                    and not result.stdout.strip() and bool(result.stderr.strip())
+                    and data.get("id") == "cli:agent:start"
+                    and isinstance(error.get("message"), str)
+                )
+    return HerdrFailure(code, pre_start_busy)
 
 
 def choose_name(name, prefix, existing):
@@ -75,7 +113,8 @@ class Launcher:
                 timeout=COMMAND_TIMEOUT, text=False):
         if mutation:
             # Set before invoking: even a timeout or malformed reply can leave
-            # a workspace, pane, or agent behind. Never retry automatically.
+            # a workspace, pane, or agent behind. Only a verified pre-input
+            # shell rejection may be retried by start_when_ready().
             self.mutation_attempted = True
         try:
             result = subprocess.run(
@@ -87,21 +126,40 @@ class Launcher:
         except (OSError, ValueError):
             raise LaunchUnavailable("Herdr command could not be executed/read.") from None
         if result.returncode:
-            raise LaunchUnavailable("Herdr command failed; inspect the known target.")
+            raise herdr_failure(result)
         if text:
             return result.stdout
         try:
             data = json.loads(result.stdout)
         except (ValueError, TypeError):
             raise LaunchUnavailable("Herdr returned unreadable JSON.") from None
-        if not isinstance(data, dict) or "error" in data:
-            raise LaunchUnavailable("Herdr returned an error or unsupported response.")
+        if not isinstance(data, dict):
+            raise LaunchUnavailable("Herdr returned an unsupported response.")
+        if "error" in data:
+            raise herdr_failure(result)
         if response_type is None:
             return data
         result = data.get("result")
         if not isinstance(result, dict) or result.get("type") != response_type:
             raise LaunchUnavailable("Herdr returned an unsupported response type.")
         return result
+
+    def start_when_ready(self, argv):
+        # Only used for the pane just created by this launch. The same name,
+        # pane and arguments survive every rejected attempt; never recreate.
+        deadline = time.monotonic() + SHELL_READY_TIMEOUT
+        while True:
+            try:
+                return self.command(
+                    argv, "agent_started", mutation=True,
+                    timeout=self.args.timeout / 1000 + COMMAND_TIMEOUT)
+            except HerdrFailure as error:
+                remaining = deadline - time.monotonic()
+                if not error.pre_start_busy or remaining <= 0:
+                    raise
+                time.sleep(min(SHELL_POLL_INTERVAL, remaining))
+                if time.monotonic() >= deadline:
+                    raise
 
     def workspace(self):
         self.stage = "workspace"
@@ -191,14 +249,17 @@ class Launcher:
     def launch(self):
         args = self.args
         requested_name = args.name if args.name is not None else args.name_prefix
-        if any(not identifier(value) for value in (requested_name, args.kind)):
-            raise LaunchUnavailable("Name/prefix and kind must be short identifiers.")
-        if args.name_prefix is not None and len(args.name_prefix) > 115:
-            raise LaunchUnavailable("Name prefix must be at most 115 characters.")
+        if not AGENT_NAME.fullmatch(requested_name):
+            raise LaunchUnavailable(
+                "Name/prefix must match [a-z][a-z0-9_-]{0,31}.")
+        if not identifier(args.kind):
+            raise LaunchUnavailable("Kind must be a short identifier.")
+        if args.name_prefix is not None and len(args.name_prefix) > 19:
+            raise LaunchUnavailable("Name prefix must be at most 19 characters.")
         if args.workspace is not None and not identifier(args.workspace):
             raise LaunchUnavailable("Workspace must be a discovered identifier.")
-        if not 1 <= args.timeout <= 300000:
-            raise LaunchUnavailable("Startup timeout must be between 1 and 300000 ms.")
+        if not 3000 < args.timeout <= 300000:
+            raise LaunchUnavailable("Startup timeout must be 3001–300000 ms.")
         self.cwd = directory(args.cwd)
         if not self.cwd.is_dir():
             raise LaunchUnavailable("Launch directory does not exist.")
@@ -222,8 +283,7 @@ class Launcher:
                 self.resources["pane_id"], "--timeout", str(args.timeout)]
         if args.agent_args:
             argv += ["--", *args.agent_args]
-        result = self.command(argv, "agent_started", mutation=True,
-                              timeout=args.timeout / 1000 + COMMAND_TIMEOUT)
+        result = self.start_when_ready(argv)
         agent = result.get("agent", {})
         if not self.verify_agent(agent):
             agent = self.command(["agent", "get", args.name], "agent_info").get("agent")
@@ -269,7 +329,7 @@ def main(argv=None):
     parser.add_argument("--kind", required=True, help="Herdr-supported canonical kind")
     parser.add_argument("--workspace", help="discovered workspace ID; verified live")
     parser.add_argument("--timeout", type=int, default=30000,
-                        help="startup timeout in ms (1–300000; default 30000)")
+                        help="startup timeout in ms (3001–300000; default 30000)")
     args = parser.parse_args(argv)
     args.agent_args = native
     launcher = Launcher(args)
@@ -288,6 +348,7 @@ def main(argv=None):
                          "issue before trying again.")
         print(json.dumps({
             "status": "error", "stage": launcher.stage, "code": code,
+            "herdr_code": getattr(error, "herdr_code", None),
             "reason": (str(error) if isinstance(error, LaunchUnavailable)
                        else "Interrupted."),
             "resources": launcher.resources,
