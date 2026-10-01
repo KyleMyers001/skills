@@ -14,6 +14,7 @@ requirements before using it elsewhere.
 | [code-critique](code-critique/SKILL.md) | Review code, diffs, plans, and technical documents without editing them. |
 | [developer](developer/SKILL.md) | Guide straightforward implementation, bug fixes, and refactoring. |
 | [frontend-design](frontend-design/SKILL.md) | Design and build distinctive web interfaces. |
+| [gate](gate/SKILL.md) | Opt-in post-implementation verification: Herdr review, E2E evidence, audit, Kyle report. |
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
 | [lavish](lavish/SKILL.md) | Create reviewable HTML artifacts for visual or complex responses. |
