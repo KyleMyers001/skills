@@ -40,7 +40,10 @@ python3 "$herdr_dir/scripts/launch-agent.py" \
 Omit `--prompt` and `--prompt-file` to launch without submitting. `--prompt` is
 a short literal; longer text belongs in a file. `--wait-timeout` is milliseconds,
 1–3600000, and requires a prompt. The Bash tool timeout must exceed it plus
-startup. Claude uses `--model` and `--effort` after `--`.
+startup; under a 600000ms Bash cap, use at most 540000 and continue with
+`agent wait`. Claude uses `--model` and `--effort` after `--`. Repeat
+`--expect-startup TEXT` to require case-insensitive banner text, such as the
+model or effort, before submitting.
 
 Those flags are the normal path. They are not a reason to read the manual or
 call Herdr directly. The helper forwards them unchanged. If a requested setting
@@ -52,10 +55,13 @@ seconds only for Herdr's proven pre-input shell-busy rejection.
 
 If `submitted` is false, do not relaunch or send another prompt. Inspect the
 returned `startup` and ask Kyle when it shows an auth failure, permission
-prompt, draft, or model contradiction. Empty or truncated startup is already
-blocked. If `submitted` is true, do not read startup again. Use `response` when
-present; otherwise extract after the agent settles. A blocked or missing
-response is not permission to resubmit.
+prompt, draft, or model contradiction. Empty, truncated, or unexpected startup
+(`startup_unexpected`: expected text missing) is already blocked; otherwise the
+helper only checks a small phrase list. If `submitted` is true, do not read
+startup again. `wait_timed_out: true` means delivered and still working: use
+`agent wait` on the same name. Use `response` when present; otherwise extract
+after the agent settles. `inspection_required` or a missing response is not
+permission to resubmit.
 
 For `code: name_exists` with `mutation_may_have_taken_effect: false`, choose a
 prefix or another name without reading recovery instructions. If Kyle required
@@ -101,7 +107,8 @@ Use one retrieval route. Return already-visible answers; otherwise reuse current
 prompt/wait metadata, or get the same agent for state and
 `result.agent.agent_session`. For Pi, its `value` normally maps the JSONL path.
 For Claude, use `path`, or find the exact `<id>.jsonl` under
-`~/.claude/projects/` by filename only. Never guess mappings.
+`~/.claude/projects/` by filename only (the launcher does this when the match
+is unique). Never guess mappings.
 
 ```bash
 python3 "$herdr_dir/scripts/extract-response.py" \

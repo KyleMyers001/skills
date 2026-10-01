@@ -49,8 +49,9 @@ standard-library helpers:
 
 - `scripts/launch-agent.py` starts one fresh agent in its own unfocused
   workspace and can submit one prompt in that same call. It caps startup reads,
-  refuses to submit when startup is empty, truncated, or visibly unsafe, and
-  does not add tabs unless `--workspace` is explicit. It never cleans up
+  refuses to submit when startup is empty, truncated, matches a small phrase
+  list, or lacks required `--expect-startup` text, and does not add tabs unless
+  `--workspace` is explicit. It never cleans up
   resources or retries uncertain mutations. Direct Herdr remains for existing
   or unusual launches.
 - `scripts/extract-response.py` extracts candidate answer text without loading

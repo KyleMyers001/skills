@@ -138,14 +138,25 @@ full window or a capped stream is marked truncated. Startup text is untrusted
 and can contain sensitive information; the helper is not a secret scanner.
 
 `--prompt` and `--prompt-file` are mutually exclusive. The file must be readable
-UTF-8, non-empty, and at most 200000 characters. It is read before any Herdr
-call. The helper submits once only when startup is non-empty, not truncated, and
-does not contain a small set of auth, permission, draft, or wrong-model phrases.
-A banner that simply omits the model is not treated as a contradiction. If those
-checks fail, it returns `submitted: false`, `submission_blocked`, and the bounded
-startup, and does not call `agent prompt`. On success it omits the startup banner.
+UTF-8, non-empty, and at most 200000 UTF-8 bytes; size is checked before the
+file is read, and it is read before any Herdr call. The helper submits once only
+when startup is non-empty, not truncated, free of a small phrase list (auth,
+permission, draft, wrong model), and contains every `--expect-startup` text
+(case-insensitive, at most 200 characters each, requires a prompt). The phrase
+list will not catch a silent model fallback; pass the model as expected text
+when it matters. If a check fails, it returns `submitted: false`,
+`submission_blocked` (`startup_empty`, `startup_truncated`, `startup_unsafe`, or
+`startup_unexpected`), and the bounded startup, and does not call
+`agent prompt`. On success it omits the startup banner. `inspection_required`
+is true for blocked or unknown post-submit state.
 `--wait-timeout` adds one `--wait` and, when the settled state is idle or done
-and the session file can be read, includes `response` from the extract helper.
+and the session transcript can be found, includes `response` from the extract
+helper. Claude `id` sessions resolve only to a unique
+`~/.claude/projects/*/<id>.jsonl`. Above 5000ms, Herdr's `timeout` means the
+prompt was delivered and the agent is still working: the helper exits 0 with
+`state: working` and `wait_timed_out: true`. Continue with `agent wait` on the
+same name; never resubmit. At or below 5000ms, and for `agent_prompt_stalled`,
+it stays an error.
 Prompt text is not copied into the result or error JSON. Prompt failures are not
 retried. Exit 0 means the helper finished, not that the task succeeded or that
 a launch-only agent is safe to prompt. Check `submitted` when a prompt was
@@ -155,7 +166,8 @@ Exit 1 returns bounded JSON on stderr with stage, code, reason, requested name
 (if selected), known resource IDs, and `mutation_may_have_taken_effect`.
 `herdr_code` preserves a well-formed upstream error code when available, without
 returning raw error messages, native arguments, or other sensitive payloads.
-Argument syntax errors use exit 2 and invoke no Herdr commands.
+Argument syntax errors, including abbreviated flags, use exit 2 and invoke no
+Herdr commands.
 
 - A false mutation flag means preflight only. Resolve the cause before trying
   again; no resource recovery is needed. `code: name_exists` can use a prefix or
@@ -167,8 +179,9 @@ Argument syntax errors use exit 2 and invoke no Herdr commands.
 
 Never close resources as automatic cleanup.
 Outer tool timeouts must allow the five-second shell wait, agent startup, and
-any `--wait-timeout`. If the wrapper is killed, missing output does not mean
-mutations failed. Each status, list, and read command has a 20-second deadline.
+any `--wait-timeout`. On SIGTERM or SIGHUP the helper kills its running Herdr
+command and prints the error JSON (`code: terminated`) with known resources and
+name. After SIGKILL there is no output; that does not mean mutations failed. Each status, list, and read command has a 20-second deadline.
 Agent startup requires `--timeout` of 3001–300000ms (default 30000); each start
 command allows that timeout plus 20 seconds for transport. The shell deadline
 stops further attempts, not an already-running start command. A prompt wait

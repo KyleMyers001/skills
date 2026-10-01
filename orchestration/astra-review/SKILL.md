@@ -46,7 +46,7 @@ available for inspection/tests.
    Model and reasoning flags after `--` are the normal path. Never reuse an
    existing conversation.
 
-   Set the Bash tool timeout above 660 seconds. Write the prompt file and launch
+   Set the Bash tool timeout to 600000ms. Write the prompt file and launch
    in that same call. Add step 2's scope. The quoted heredoc preserves prompt
    text literally.
 
@@ -73,11 +73,16 @@ available for inspection/tests.
    python3 "$herdr_dir/scripts/launch-agent.py" \
      --cwd "<absolute repository/worktree path>" \
      --name-prefix astra-review --kind pi \
-     --prompt-file "$prompt_file" --wait-timeout 600000 -- \
+     --prompt-file "$prompt_file" --wait-timeout 540000 \
+     --expect-startup gpt-6-astra -- \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
 
+   If `wait_timed_out` is true, the review is still running on the same agent.
+   In separate Bash calls with a 600000ms timeout, repeat
+   `herdr --session Subagents agent wait "<name>" --timeout 540000` while it
+   returns `timeout`; then continue with step 4. Never resubmit the prompt.
    If `submitted` is false, stop and report the returned startup. Do not relaunch
    or submit the prompt yourself. If the launcher fails after creating resources,
    follow Herdr's recovery rules for that same agent; do not start another.
