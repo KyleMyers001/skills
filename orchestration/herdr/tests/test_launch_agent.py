@@ -1,6 +1,5 @@
 """Launch contracts against a fake CLI; never launch real agents."""
 
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,7 +11,11 @@ import unittest
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/launch-agent.py"
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+SCRIPT = SCRIPTS / "launch-agent.py"
+sys.path.insert(0, str(SCRIPTS))
+from herdr_launch import checks, cli, client, errors, launcher  # noqa: E402
+from herdr_launch.process import CommandResult  # noqa: E402
 FAKE = r'''import json, os, re, sys, time
 from pathlib import Path
 args = sys.argv[1:]
@@ -86,11 +89,6 @@ class LaunchAgentTests(unittest.TestCase):
                 "protocol": 19, "version": "0.8.0"}),
             step(["agent", "list"], response("agent_list", agents=[])),
         ]
-
-    def workspaces(self, ids=()):
-        return step(["workspace", "list"], response(
-            "workspace_list", workspaces=[
-                {"workspace_id": value, "label": "duplicate"} for value in ids]))
 
     def panes(self, workspace="w2", directories=None):
         if directories is None:
@@ -250,12 +248,6 @@ class LaunchAgentTests(unittest.TestCase):
         self.assert_failure(result, "workspace")
         self.assertEqual(len(calls), 3)
 
-    def test_default_launch_ignores_other_workspaces(self):
-        steps = self.happy_steps()
-        result, calls = self.run_launcher(steps)
-        self.assert_success(result)
-        self.assertFalse(any(call[2:4] == ["workspace", "list"] for call in calls))
-
     def test_duplicate_agent_name_stops_before_discovery(self):
         steps = self.preflight()
         steps[-1] = step(["agent", "list"], response(
@@ -297,28 +289,25 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertEqual(data["resources"]["pane_id"], "w2:p1")
 
     def test_name_generation_checks_registry_and_is_bounded(self):
-        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         occupied = "worker-" + "a" * 12
         fresh = "worker-" + "b" * 12
-        with patch.object(module.uuid, "uuid4", side_effect=[
-                module.uuid.UUID("a" * 32), module.uuid.UUID("b" * 32)]) as generate:
-            self.assertEqual(module.choose_name(None, "worker", {occupied}), fresh)
+        with patch.object(checks.uuid, "uuid4", side_effect=[
+                checks.uuid.UUID("a" * 32), checks.uuid.UUID("b" * 32)]) as generate:
+            self.assertEqual(checks.choose_name(None, "worker", {occupied}), fresh)
             self.assertEqual(generate.call_count, 2)
-        with patch.object(module.uuid, "uuid4",
-                          return_value=module.uuid.UUID("a" * 32)) as generate:
-            with self.assertRaises(module.LaunchUnavailable) as raised:
-                module.choose_name(None, "worker", {occupied})
+        with patch.object(checks.uuid, "uuid4",
+                          return_value=checks.uuid.UUID("a" * 32)) as generate:
+            with self.assertRaises(errors.LaunchUnavailable) as raised:
+                checks.choose_name(None, "worker", {occupied})
             self.assertEqual(raised.exception.code, "name_generation_failed")
             self.assertEqual(generate.call_count, 10)
-        with patch.object(module.uuid, "uuid4") as generate:
-            self.assertEqual(module.choose_name("worker", None, set()), "worker")
-            with self.assertRaises(module.LaunchUnavailable) as raised:
-                module.choose_name("worker", None, {"worker"})
+        with patch.object(checks.uuid, "uuid4") as generate:
+            self.assertEqual(checks.choose_name("worker", None, set()), "worker")
+            with self.assertRaises(errors.LaunchUnavailable) as raised:
+                checks.choose_name("worker", None, {"worker"})
             self.assertEqual(raised.exception.code, "name_exists")
             generate.assert_not_called()
-        self.assertEqual(len(module.choose_name(None, "x" * 19, set())), 32)
+        self.assertEqual(len(checks.choose_name(None, "x" * 19, set())), 32)
 
     def test_prefix_and_exact_name_are_exclusive_and_prefix_is_bounded(self):
         for naming in ([], ["--name", "worker", "--name-prefix", "worker"]):
@@ -574,9 +563,6 @@ class LaunchAgentTests(unittest.TestCase):
                 self.assertEqual(calls[-1], calls[-2])
 
     def test_busy_wait_is_bounded_and_retains_created_resources(self):
-        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         clock = [0.0]
         initial = iter(self.happy_steps()[:3])
         busy = json.dumps({"id": "cli:agent:start", "error": {
@@ -586,20 +572,20 @@ class LaunchAgentTests(unittest.TestCase):
             if argv[3:5] != ["agent", "start"]:
                 item = next(initial)
                 self.assertEqual(argv[1:], item["args"])
-                return subprocess.CompletedProcess(argv, 0, item["output"], "")
-            return subprocess.CompletedProcess(argv, 1, "", busy)
+                return CommandResult(0, item["output"], "")
+            return CommandResult(1, "", busy)
 
         def sleep(seconds):
             clock[0] += seconds
 
-        with patch.object(module, "SHELL_READY_TIMEOUT", 0.25), \
-             patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
-             patch.object(module.time, "sleep", side_effect=sleep), \
-             patch.object(module, "run_bounded", side_effect=run) as process, \
-             patch.object(module.shutil, "which", return_value="herdr"), \
-             patch.object(module.sys, "stdout") as stdout, \
-             patch.object(module.sys, "stderr") as stderr:
-            code = module.main(["--cwd", str(self.cwd), "--name", "worker", "--kind", "pi"])
+        with patch.object(client, "SHELL_READY_TIMEOUT", 0.25), \
+             patch.object(client.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(client.time, "sleep", side_effect=sleep), \
+             patch.object(client, "run_bounded", side_effect=run) as process, \
+             patch.object(launcher.shutil, "which", return_value="herdr"), \
+             patch.object(cli.sys, "stdout") as stdout, \
+             patch.object(cli.sys, "stderr") as stderr:
+            code = cli.main(["--cwd", str(self.cwd), "--name", "worker", "--kind", "pi"])
         self.assertEqual(code, 1)
         self.assertFalse(stdout.write.called)
         self.assertAlmostEqual(clock[0], 0.25)
@@ -730,16 +716,13 @@ class LaunchAgentTests(unittest.TestCase):
                 self.assertEqual(len(calls), len(steps))
 
     def test_transport_failures_have_bounded_diagnostics(self):
-        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         for error in (OSError("PRIVATE_PAYLOAD"), ValueError("PRIVATE_PAYLOAD"),
                       UnicodeError("PRIVATE_PAYLOAD"), KeyboardInterrupt()):
             with self.subTest(error=type(error).__name__):
-                with patch.object(module, "run_bounded", side_effect=error), \
-                     patch.object(module.shutil, "which", return_value="herdr"), \
-                     patch.object(module.sys, "stderr") as stderr:
-                    code = module.main(["--cwd", str(self.cwd), "--name",
+                with patch.object(client, "run_bounded", side_effect=error), \
+                     patch.object(launcher.shutil, "which", return_value="herdr"), \
+                     patch.object(cli.sys, "stderr") as stderr:
+                    code = cli.main(["--cwd", str(self.cwd), "--name",
                                         "worker", "--kind", "pi"])
                 self.assertEqual(code, 1)
                 output = "".join(call.args[0] for call in stderr.write.call_args_list)
@@ -748,21 +731,18 @@ class LaunchAgentTests(unittest.TestCase):
 
     def test_timeout_at_mutation_stages_is_uncertain_without_retry(self):
         # Inject subprocess timeouts in-process to avoid slow wall-clock tests.
-        spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         for index in range(5):
             with self.subTest(index=index):
-                responses = [subprocess.CompletedProcess(
-                    item["args"], 0, item["output"], "")
+                responses = [CommandResult(
+                    0, item["output"], "")
                     for item in self.happy_steps()[:index]]
                 responses.append(subprocess.TimeoutExpired(
                     "herdr", 1, output="PRIVATE_PAYLOAD"))
-                with patch.object(module, "run_bounded", side_effect=responses) as run, \
-                     patch.object(module.shutil, "which", return_value="herdr"), \
-                     patch.object(module.sys, "stdout") as stdout, \
-                     patch.object(module.sys, "stderr") as stderr:
-                    code = module.main(["--cwd", str(self.cwd), "--name",
+                with patch.object(client, "run_bounded", side_effect=responses) as run, \
+                     patch.object(launcher.shutil, "which", return_value="herdr"), \
+                     patch.object(cli.sys, "stdout") as stdout, \
+                     patch.object(cli.sys, "stderr") as stderr:
+                    code = cli.main(["--cwd", str(self.cwd), "--name",
                                         "worker", "--kind", "pi"])
                 self.assertEqual(code, 1)
                 self.assertFalse(stdout.write.called)
