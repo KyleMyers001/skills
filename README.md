@@ -44,12 +44,25 @@ Run the example from the repository root, and use the individual skill path
 (for example, `orchestration/herdr`) for nested skills. Don't replace an existing
 installed skill without checking it first.
 
-Skills are primarily instructions. Herdr also bundles
-`scripts/extract-response.py`, an optional Python 3 standard-library helper that
-extracts candidate answer text without loading raw transcripts into the
-orchestrator. It does not validate handoffs or launch agents; extraction failures
-use the same agent's terminal response, never an automatic model rerun. Keep the
-whole skill directory when installing it.
+Skills are primarily instructions. Herdr also bundles two Python 3
+standard-library helpers:
+
+- `scripts/launch-agent.py` starts one fresh agent in its own unfocused
+  workspace and can submit one prompt in that same call. It caps startup reads,
+  refuses to submit when startup is empty, truncated, matches a small phrase
+  list, or lacks required `--expect-startup` text, and does not add tabs unless
+  `--workspace` is explicit. It never cleans up
+  resources or retries uncertain mutations. Direct Herdr remains for existing
+  or unusual launches.
+- `scripts/extract-response.py` extracts candidate answer text without loading
+  raw transcripts into the orchestrator. It does not validate handoffs or launch
+  agents; extraction failures use the same agent's terminal response, never an
+  automatic model rerun.
+
+Keep the whole skill directory, including scripts and references, when installing
+it. See the [Herdr skill](orchestration/herdr/SKILL.md) for the normal workflow.
+See its [manual reference](orchestration/herdr/references/manual-launch.md) for
+persona launches, helper limits, and recovery.
 
 Tools such as `agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed
 and configured separately where required. The descriptions in each `SKILL.md`

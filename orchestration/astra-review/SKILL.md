@@ -15,8 +15,8 @@ available for inspection/tests.
 ## Runbook
 
 1. Load [Herdr](../herdr/SKILL.md) unless already read for this invocation;
-   follow its discovery, targeting, waiting, and safety rules. Reuse its checks,
-   not a second checklist. Every Herdr command needs `--session Subagents`.
+   follow its fresh-launch and safety rules. Do not add a discovery or manual
+   launch checklist. Every direct Herdr command needs `--session Subagents`.
 2. Establish absolute target path, branch, base/commit range, and included
    staged/unstaged/untracked files. Record `git status --short --branch` and
    this digest before review:
@@ -39,31 +39,22 @@ available for inspection/tests.
    `openai-codex/gpt-6-astra`. If it is unavailable, stop; never guess or
    substitute another provider, Astra variant, or GPT 5.6 Sol Max.
 
-   Discover the matching workspace and a short unique name prefixed with
-   `astra-review`; create an unfocused background tab and launch one fresh
-   conversation with the discovered model. Never reuse an existing conversation:
+   Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
+   review skill. Use one launcher call with the `astra-review` prefix and the
+   verified model. Do not discover workspaces, create tabs, read the manual
+   launch reference, or call `herdr agent start` / `agent prompt` yourself.
+   Model and reasoning flags after `--` are the normal path. Never reuse an
+   existing conversation.
+
+   Set the Bash tool timeout to 600000ms and the initial wait to 300000ms;
+   reserve the rest for launch, verification, extraction, and subprocess cleanup.
+   Write the prompt file and launch in that same call. Add step 2's scope.
+   The quoted heredoc preserves prompt text literally.
 
    ```bash
-   herdr --session Subagents agent start <unique-astra-name> \
-     --kind pi --pane <discovered-pane-id> -- \
-     --model openai-codex/gpt-6-astra --thinking high \
-     --exclude-tools edit,write
-   ```
-
-   Use Herdr's short startup `get`/`read` once for directory and launch errors.
-   If the startup display visibly contradicts the requested model, reasoning, or
-   directory, stop and ask Kyle before submitting the task. Missing display
-   metadata is not a new gate. Do not revalidate transcript metadata after
-   submission. Excluding tools is defense in depth, not a Bash security boundary.
-4. Set `agent_name` to the launched agent's unique Astra-based name. Add step
-   2's scope below.
-   Run this directly in Bash, not inside another `sh -c`/`eval` string. The
-   quoted heredoc preserves prompt text literally. Avoid `$(...)` around the
-   heredoc: macOS Bash 3.2 can misparse embedded quotes there. `read` returns
-   nonzero at EOF; `|| :` handles that expected status.
-
-   ```bash
-   IFS= read -r -d '' prompt <<'REVIEW_PROMPT' || :
+   prompt_file=$(mktemp)
+   trap 'rm -f "$prompt_file"' EXIT
+   cat > "$prompt_file" << 'REVIEW_PROMPT'
    I am an orchestrating agent working on Kyle's behalf. This is an assigned
    review to carry out; reply to me, not Kyle.
    Review the current work in this repository fully and carefully as a neutral
@@ -80,18 +71,31 @@ available for inspection/tests.
    production, and explain how to fix serious or critical issues. Follow all
    repository and global instructions.
    REVIEW_PROMPT
-   herdr --session Subagents agent prompt "$agent_name" "$prompt" \
-     --wait --timeout 600000
+   python3 "$herdr_dir/scripts/launch-agent.py" \
+     --cwd "<absolute repository/worktree path>" \
+     --name-prefix astra-review --kind pi \
+     --prompt-file "$prompt_file" --wait-timeout 300000 \
+     --expect-startup gpt-6-astra --expect-startup "gpt-6-astra • high" -- \
+     --model openai-codex/gpt-6-astra --thinking high \
+     --exclude-tools edit,write
    ```
 
-   Follow Herdr's submission recovery rules: a confirmed local failure before
-   Herdr was invoked can be fixed without approval; it is still the first
-   submission. For blocked, unknown, stalled, or timed-out results, inspect
-   `agent get` and `agent read`. Never blindly resend or overwrite composer text;
-   uncertain receipt is not permission to duplicate work.
-5. Use Herdr's Return Output path directly after waiting: mapped text extraction
-   first, bounded terminal fallback only if needed. Never load raw JSONL, require
-   a handoff validator, or read the full report by both routes. Return it in full,
+   If `wait_timed_out` is true, the review is still running on the same agent.
+   In separate Bash calls with a 600000ms timeout, repeat
+   `herdr --session Subagents agent wait "<name>" --timeout 540000` while it
+   returns `timeout`; then continue with step 4. Never resubmit the prompt.
+   If `submitted` is false, stop and report the returned startup. Do not relaunch
+   or submit the prompt yourself. If the launcher fails after creating resources,
+   follow Herdr's recovery rules for that same agent; do not start another.
+   Excluding tools is defense in depth, not a Bash security boundary. Missing
+   display metadata beyond the required model and contiguous Pi footer
+   `gpt-6-astra • high` is not a new gate. Missing either required signal blocks
+   submission; unrelated `high` text is not reasoning evidence.
+4. If the result includes `response`, return that text in full and skip
+   extraction. Otherwise set `agent_name` to the returned `name`, including its
+   suffix, and use Herdr's Return Output path: mapped text extraction first,
+   bounded terminal fallback only if needed. Never load raw JSONL, require a
+   handoff validator, or read the full report by both routes. Return it in full,
    without rewriting, summarizing, or dropping findings. Minimally redact secrets
    and disclose redactions. Idle alone is inconclusive: inspect for a final report
    or a genuine agent failure. Surface launch, authentication,
@@ -108,11 +112,10 @@ available for inspection/tests.
    Inspect/read/wait on the same agent. Without Kyle's explicit approval,
    never restart, re-prompt, launch another reviewer, or ask it to copy or
    regenerate output to repair bookkeeping or retrieve a report.
-6. Repeat step 2's status/digest. Report changes with a bounded status/diff,
+5. Repeat step 2's status/digest. Report changes with a bounded status/diff,
    without attributing them to an actor or reverting them. If status/digest
    collection fails, disclose it without withholding the report or rerunning.
-   Do not clean up, close the tab, or stop the agent without Kyle's explicit
-   approval.
+   Do not close the workspace, tab, or agent without Kyle's explicit approval.
 
 Use another harness only if Kyle explicitly requests it. Preserve
 `openai-codex/gpt-6-astra`, high reasoning, the same scope, and global
