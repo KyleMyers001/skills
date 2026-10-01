@@ -40,8 +40,11 @@ python3 "$herdr_dir/scripts/launch-agent.py" \
 Omit `--prompt` and `--prompt-file` to launch without submitting. `--prompt` is
 a short literal; longer text belongs in a file. `--wait-timeout` is milliseconds,
 1–3600000, and requires a prompt. The Bash tool timeout must exceed it plus
-startup; under a 600000ms Bash cap, use at most 540000 and continue with
-`agent wait`. Claude uses `--model` and `--effort` after `--`. Repeat
+the full launch sequence, verification, extraction, and subprocess cleanup.
+Under a 600000ms Bash cap with the default startup timeout, use at most 300000
+for the initial wait and continue with `agent wait`. Larger startup timeouts
+need a smaller initial wait or a larger Bash budget. Claude uses `--model` and
+`--effort` after `--`. Repeat
 `--expect-startup TEXT` to require case-insensitive banner text, such as the
 model or effort, before submitting.
 

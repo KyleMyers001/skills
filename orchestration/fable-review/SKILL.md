@@ -49,9 +49,10 @@ inspection/tests.
    `herdr agent start` / `agent prompt` yourself. Model and effort flags after
    `--` are the normal path. Never reuse an existing conversation.
 
-   Set the Bash tool timeout to 600000ms. Write the prompt file and launch
-   in that same call. Add step 2's scope. The quoted heredoc preserves prompt
-   text literally.
+   Set the Bash tool timeout to 600000ms and the initial wait to 300000ms;
+   reserve the rest for launch, verification, extraction, and subprocess cleanup.
+   Write the prompt file and launch in that same call. Add step 2's scope.
+   The quoted heredoc preserves prompt text literally.
 
    ```bash
    prompt_file=$(mktemp)
@@ -76,7 +77,7 @@ inspection/tests.
    python3 "$herdr_dir/scripts/launch-agent.py" \
      --cwd "<absolute repository/worktree path>" \
      --name-prefix fable-review --kind claude \
-     --prompt-file "$prompt_file" --wait-timeout 540000 \
+     --prompt-file "$prompt_file" --wait-timeout 300000 \
      --expect-startup fable --expect-startup "with high effort" -- \
      --model fable --effort high --disallowed-tools Edit,Write,NotebookEdit
    ```

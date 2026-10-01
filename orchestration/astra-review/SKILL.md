@@ -46,9 +46,10 @@ available for inspection/tests.
    Model and reasoning flags after `--` are the normal path. Never reuse an
    existing conversation.
 
-   Set the Bash tool timeout to 600000ms. Write the prompt file and launch
-   in that same call. Add step 2's scope. The quoted heredoc preserves prompt
-   text literally.
+   Set the Bash tool timeout to 600000ms and the initial wait to 300000ms;
+   reserve the rest for launch, verification, extraction, and subprocess cleanup.
+   Write the prompt file and launch in that same call. Add step 2's scope.
+   The quoted heredoc preserves prompt text literally.
 
    ```bash
    prompt_file=$(mktemp)
@@ -73,8 +74,8 @@ available for inspection/tests.
    python3 "$herdr_dir/scripts/launch-agent.py" \
      --cwd "<absolute repository/worktree path>" \
      --name-prefix astra-review --kind pi \
-     --prompt-file "$prompt_file" --wait-timeout 540000 \
-     --expect-startup gpt-6-astra -- \
+     --prompt-file "$prompt_file" --wait-timeout 300000 \
+     --expect-startup gpt-6-astra --expect-startup "thinking: high" -- \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
@@ -87,7 +88,8 @@ available for inspection/tests.
    or submit the prompt yourself. If the launcher fails after creating resources,
    follow Herdr's recovery rules for that same agent; do not start another.
    Excluding tools is defense in depth, not a Bash security boundary. Missing
-   display metadata is not a new gate.
+   display metadata beyond the required model and `thinking: high` evidence is
+   not a new gate. Missing either required signal blocks submission.
 4. If the result includes `response`, return that text in full and skip
    extraction. Otherwise set `agent_name` to the returned `name`, including its
    suffix, and use Herdr's Return Output path: mapped text extraction first,
