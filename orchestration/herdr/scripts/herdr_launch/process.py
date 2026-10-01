@@ -11,6 +11,7 @@ from typing import BinaryIO
 JSON_STDOUT_LIMIT = 1_048_576
 STDERR_LIMIT = 65_536
 READ_CHUNK = 65_536
+REAP_TIMEOUT = 5
 
 
 @dataclass
@@ -33,12 +34,13 @@ def read_capped(stream: BinaryIO, limit: int) -> tuple[bytes, bool]:
             chunks.append(chunk)
             total += len(chunk)
         return b"".join(chunks), bool(stream.read(1))
-    except OSError:
+    except (OSError, ValueError):
         return b"".join(chunks), True
 
 
 def run_bounded(argv: list[str], *, timeout: float,
                 max_stdout: int = JSON_STDOUT_LIMIT) -> CommandResult:
+    """Run `argv`; on timeout or interruption, kill it before re-raising."""
     process = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     captured = {}
@@ -49,24 +51,31 @@ def run_bounded(argv: list[str], *, timeout: float,
         if truncated:
             process.kill()
 
+    # Daemon readers cannot keep the launcher alive if a pipe never closes.
     threads = [
-        threading.Thread(target=collect,
+        threading.Thread(target=collect, daemon=True,
                          args=(process.stdout, "stdout", max_stdout)),
-        threading.Thread(target=collect,
+        threading.Thread(target=collect, daemon=True,
                          args=(process.stderr, "stderr", STDERR_LIMIT)),
     ]
-    for thread in threads:
-        thread.start()
     try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
         for thread in threads:
-            thread.join(timeout=5)
+            thread.start()
+        process.wait(timeout=timeout)
+    except BaseException:
+        process.kill()
+        try:
+            process.wait(timeout=REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass
         raise
-    for thread in threads:
-        thread.join(timeout=5)
+    finally:
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=REAP_TIMEOUT)
+        if not any(thread.is_alive() for thread in threads):
+            process.stdout.close()
+            process.stderr.close()
     stdout, stdout_truncated = captured.get("stdout", (b"", False))
     stderr, _stderr_truncated = captured.get("stderr", (b"", False))
     return CommandResult(

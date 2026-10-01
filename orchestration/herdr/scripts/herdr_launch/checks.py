@@ -14,15 +14,18 @@ AGENT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 NAME_PREFIX_MAX = 19
 NAME_ATTEMPTS = 10
-PROMPT_CHARACTERS = 200_000
+# Bytes, not characters: the prompt travels as one argv entry, and macOS
+# caps argv plus environment at about 1 MiB.
+PROMPT_BYTES = 200_000
+EXPECTATION_CHARACTERS = 200
 WAIT_TIMEOUT_MAX = 3_600_000
 STARTUP_LINES = 80
 STARTUP_CHARACTERS = 8000
 # Worst-case UTF-8 for the character cap. The read stops here and kills the
 # CLI; Herdr's --lines flag does not bound a single unwrapped line.
 STARTUP_BYTES = STARTUP_CHARACTERS * 4
-# Mechanical blockers only. A normal banner that omits the model is not a
-# contradiction, and this is not a semantic review of the startup text.
+# A small phrase list for mechanical blockers, not a semantic review of the
+# startup text. Use expected startup text to require a model or effort.
 STARTUP_BLOCKERS = (
     "authentication required",
     "not authenticated",
@@ -71,6 +74,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise LaunchUnavailable("Workspace must be a discovered identifier.")
     if not 3000 < args.timeout <= 300000:
         raise LaunchUnavailable("Startup timeout must be 3001–300000 ms.")
+    if args.expect_startup and args.prompt is None and args.prompt_file is None:
+        raise LaunchUnavailable("Expected startup text requires a prompt.")
+    if any(not text.strip() or len(text) > EXPECTATION_CHARACTERS
+           for text in args.expect_startup):
+        raise LaunchUnavailable(
+            "Expected startup text must be 1–200 non-blank characters.")
 
 
 def choose_name(name: str | None, prefix: str | None,
@@ -102,6 +111,8 @@ def load_prompt(args: argparse.Namespace) -> str | None:
         if not path.is_file():
             raise LaunchUnavailable("Prompt file is missing.")
         try:
+            if path.stat().st_size > PROMPT_BYTES:
+                raise LaunchUnavailable("Prompt exceeds 200000 UTF-8 bytes.")
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             raise LaunchUnavailable("Prompt file could not be read.") from None
@@ -109,8 +120,8 @@ def load_prompt(args: argparse.Namespace) -> str | None:
         return None
     if not text.strip():
         raise LaunchUnavailable("Prompt must not be empty.")
-    if len(text) > PROMPT_CHARACTERS:
-        raise LaunchUnavailable("Prompt exceeds 200000 characters.")
+    if len(text.encode("utf-8")) > PROMPT_BYTES:
+        raise LaunchUnavailable("Prompt exceeds 200000 UTF-8 bytes.")
     return text
 
 
@@ -122,7 +133,9 @@ def trim_startup(text: str, hit_cap: bool) -> tuple[str, bool]:
     return "".join(lines[:STARTUP_LINES])[:STARTUP_CHARACTERS], truncated
 
 
-def submission_block(startup: str, truncated: bool) -> str | None:
+def submission_block(startup: str, truncated: bool,
+                     expected: list[str]) -> str | None:
+    """Return why the prompt must not be submitted, or None."""
     if not startup.strip():
         return "startup_empty"
     if truncated:
@@ -130,4 +143,6 @@ def submission_block(startup: str, truncated: bool) -> str | None:
     lowered = startup.casefold()
     if any(phrase in lowered for phrase in STARTUP_BLOCKERS):
         return "startup_unsafe"
+    if any(text.casefold() not in lowered for text in expected):
+        return "startup_unexpected"
     return None

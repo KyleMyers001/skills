@@ -49,7 +49,8 @@ class Launcher:
             payload.update(submission.startup_fields(startup, truncated))
             payload["inspection_required"] = True
             return payload
-        blocked = checks.submission_block(startup, truncated)
+        blocked = checks.submission_block(
+            startup, truncated, args.expect_startup)
         if blocked:
             payload.update(submission.blocked_result(blocked, startup, truncated))
             return payload

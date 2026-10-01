@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -12,6 +13,8 @@ from .process import run_bounded
 
 SESSION_VALUE_MAX = 4096
 EXTRACTOR = Path(__file__).resolve().parents[1] / "extract-response.py"
+# Claude reports a session id; its transcript is <projects>/<project>/<id>.jsonl.
+CLAUDE_SESSION_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 
 
 def session_mapping(agent: object, kind: str) -> dict | None:
@@ -24,13 +27,23 @@ def session_mapping(agent: object, kind: str) -> dict | None:
     return None
 
 
+def transcript_path(session: dict) -> Path | None:
+    if session["kind"] == "path":
+        return Path(session["value"])
+    if (session["agent"] != "claude"
+            or not CLAUDE_SESSION_ID.fullmatch(session["value"])):
+        return None
+    projects = Path.home() / ".claude" / "projects"
+    matches = list(projects.glob(f"*/{session['value']}.jsonl"))
+    return matches[0] if len(matches) == 1 else None
+
+
 def extract_answer(session: dict | None, kind: str) -> str | None:
     """Return candidate text only after a settled wait. Never raise."""
-    if (kind not in ("pi", "claude") or not session
-            or session.get("kind") != "path"):
+    if kind not in ("pi", "claude") or not session:
         return None
-    path = Path(session["value"])
-    if not path.is_file():
+    path = transcript_path(session)
+    if path is None or not path.is_file():
         return None
     try:
         result = run_bounded(

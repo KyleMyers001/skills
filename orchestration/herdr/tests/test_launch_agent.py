@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS / "launch-agent.py"
 sys.path.insert(0, str(SCRIPTS))
-from herdr_launch import checks, cli, client, errors, launcher  # noqa: E402
+from herdr_launch import checks, cli, client, errors, launcher, session  # noqa: E402
 from herdr_launch.process import CommandResult  # noqa: E402
 FAKE = r'''import json, os, re, sys, time
 from pathlib import Path
@@ -37,9 +38,11 @@ if generated:
 if args != expected:
     print("unexpected command", file=sys.stderr)
     sys.exit(90)
-sys.stdout.write(step.get("output", "").replace("$GENERATED_NAME", generated or ""))
+# Write bytes like the real CLI, independent of this process's stdio encoding.
+output = step.get("output", "").replace("$GENERATED_NAME", generated or "")
+sys.stdout.buffer.write(output.encode("utf-8"))
 sys.stdout.flush()
-sys.stderr.write(step.get("stderr", ""))
+sys.stderr.buffer.write(step.get("stderr", "").encode("utf-8"))
 sys.stderr.flush()
 if step.get("hold"):
     time.sleep(step["hold"])
@@ -796,7 +799,7 @@ class LaunchAgentTests(unittest.TestCase):
         cases = {
             "startup_empty": "",
             "startup_truncated": "x" * 20000,
-            "startup_unsafe": "Authentication required\nWrong model loaded\n> Human draft",
+            "startup_unsafe": "Pi v0.99\nNot logged in. Run /login to continue.\n",
         }
         for code, text in cases.items():
             with self.subTest(code=code):
@@ -867,6 +870,163 @@ class LaunchAgentTests(unittest.TestCase):
         self.assert_failure(result, "input")
         self.assertEqual(calls, [])
 
+
+    def prompt_error(self, code, wait_timeout="6000"):
+        steps = self.prompt_steps()
+        steps[-1]["args"] += ["--wait", "--timeout", wait_timeout]
+        steps[-1].update(code=1, output="", stderr=json.dumps({
+            "id": "cli:agent:prompt",
+            "error": {"code": code, "message": "PRIVATE_PAYLOAD"}}))
+        return self.run_launcher(
+            steps, ["--prompt", "Review the diff", "--wait-timeout", wait_timeout],
+            allow_prompt=True)
+
+    def test_wait_timeout_after_delivery_reports_a_working_agent(self):
+        result, calls = self.prompt_error("timeout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["submitted"])
+        self.assertTrue(data["waited"])
+        self.assertTrue(data["wait_timed_out"])
+        self.assertEqual(data["state"], "working")
+        self.assertFalse(data["inspection_required"])
+        self.assertEqual(data["name"], "worker")
+        self.assertEqual(data["session"]["value"], "/tmp/session.jsonl")
+        self.assertNotIn("response", data)
+        self.assertEqual(sum(call[2:4] == ["agent", "prompt"] for call in calls), 1)
+
+    def test_short_wait_timeout_and_stalls_remain_failures(self):
+        for code, wait_timeout in (("timeout", "5000"),
+                                   ("agent_prompt_stalled", "6000")):
+            with self.subTest(code=code):
+                result, _ = self.prompt_error(code, wait_timeout)
+                data = self.assert_failure(result, "prompt")
+                self.assertEqual(data["herdr_code"], code)
+
+    def test_blocked_after_wait_requires_inspection(self):
+        steps = self.prompt_steps()
+        steps[-1]["args"] += ["--wait", "--timeout", "6000"]
+        steps[-1]["output"] = json.dumps(response(
+            "agent_prompted", agent={**self.agent, "agent_status": "blocked"}))
+        result, _ = self.run_launcher(
+            steps, ["--prompt", "Review the diff", "--wait-timeout", "6000"],
+            allow_prompt=True)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["state"], "blocked")
+        self.assertTrue(data["submitted"])
+        self.assertTrue(data["inspection_required"])
+        self.assertNotIn("response", data)
+
+    def test_expected_startup_text_gates_submission(self):
+        banner = "Claude Code v2\nFable 5.1 with high effort · Claude Max\n"
+        expect = ["--expect-startup", "fable", "--expect-startup", "High Effort"]
+        steps = self.prompt_steps(text=banner)
+        result, _ = self.run_launcher(
+            steps, ["--prompt", "Review the diff", *expect], allow_prompt=True)
+        self.assertTrue(json.loads(result.stdout)["submitted"])
+        steps = self.happy_steps()
+        steps[-1] = self.read(banner.replace("Fable 5.1", "Sonnet 5.5"))
+        result, calls = self.run_launcher(steps, ["--prompt", "go", *expect])
+        data = self.assert_success(result)
+        self.assertFalse(data["submitted"])
+        self.assertEqual(data["submission_blocked"], "startup_unexpected")
+        self.assertIn("Sonnet 5.5", data["startup"])
+        self.assertFalse(any(call[2:4] == ["agent", "prompt"] for call in calls))
+
+    def test_expected_startup_text_is_validated_before_herdr(self):
+        for extra in (["--expect-startup", "fable"],
+                      ["--prompt", "go", "--expect-startup", " "],
+                      ["--prompt", "go", "--expect-startup", "x" * 201]):
+            with self.subTest(extra=extra):
+                result, calls = self.run_launcher([], extra)
+                self.assert_failure(result, "input")
+                self.assertEqual(calls, [])
+
+    def test_abbreviated_flags_are_rejected(self):
+        for extra in (["--prompt", "go", "--wait", "1000"], ["--time", "5000"]):
+            with self.subTest(extra=extra):
+                result, calls = self.run_launcher([], extra)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(calls, [])
+
+    def test_prompt_size_is_capped_in_utf8_bytes(self):
+        prompt_path = self.directory / "prompt.txt"
+        prompt_path.write_text("€" * 70_000, encoding="utf-8")
+        result, calls = self.run_launcher([], ["--prompt-file", str(prompt_path)])
+        data = self.assert_failure(result, "input")
+        self.assertIn("bytes", data["reason"])
+        self.assertEqual(calls, [])
+
+    def test_output_survives_a_non_utf8_stdio_encoding(self):
+        steps = self.happy_steps()
+        steps[-1] = self.read("Ready ✓ 日本\n")
+        env = {**self.env, "PYTHONIOENCODING": "iso-8859-1"}
+        result, _ = self.run_launcher(steps, env=env)
+        self.assertEqual(json.loads(result.stdout)["startup"], "Ready ✓ 日本\n")
+
+    def test_sigterm_reports_known_resources_and_stops_the_child(self):
+        steps = self.prompt_steps()
+        steps[-1].update(output="", hold=30)
+        self.steps_file.write_text(json.dumps(steps))
+        process = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "--cwd", str(self.cwd), "--name",
+             "worker", "--kind", "pi", "--prompt", "Review the diff"],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=self.directory)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.log.exists() and len(self.log.read_text().splitlines()) == len(steps):
+                break
+            time.sleep(0.05)
+        time.sleep(0.2)
+        started = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(stdout, "")
+        data = json.loads(stderr)
+        self.assertEqual(data["code"], "terminated")
+        self.assertEqual(data["stage"], "prompt")
+        self.assertEqual(data["requested_name"], "worker")
+        self.assertEqual(data["resources"]["pane_id"], "w2:p1")
+        self.assertTrue(data["mutation_may_have_taken_effect"])
+
+
+class ClaudeSessionTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name)
+        self.session_id = "0f5c2b9e-1a2b-4c3d-8e9f-0123456789ab"
+        patcher = patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def transcript(self, project, text="Final report"):
+        path = self.home / ".claude/projects" / project / f"{self.session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "assistant", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": text}]}})
+            + "\n", encoding="utf-8")
+
+    def answer(self, value=None):
+        return session.extract_answer({
+            "agent": "claude", "kind": "id",
+            "value": value or self.session_id}, "claude")
+
+    def test_unique_id_transcript_is_extracted(self):
+        self.transcript("-Users-kyle-repo")
+        self.assertEqual(self.answer(), "Final report")
+
+    def test_ambiguous_missing_or_unsafe_ids_return_nothing(self):
+        self.assertIsNone(self.answer())
+        self.transcript("a")
+        self.transcript("b")
+        self.assertIsNone(self.answer())
+        for value in ("../a/" + self.session_id, "*", "a/b"):
+            with self.subTest(value=value):
+                self.assertIsNone(self.answer(value))
 
 if __name__ == "__main__":
     unittest.main()
