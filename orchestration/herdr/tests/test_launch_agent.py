@@ -7,12 +7,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/launch-agent.py"
-FAKE = r'''import json, os, re, sys
+FAKE = r'''import json, os, re, sys, time
 from pathlib import Path
 args = sys.argv[1:]
 log = Path(os.environ["FAKE_LOG"])
@@ -34,7 +35,11 @@ if args != expected:
     print("unexpected command", file=sys.stderr)
     sys.exit(90)
 sys.stdout.write(step.get("output", "").replace("$GENERATED_NAME", generated or ""))
+sys.stdout.flush()
 sys.stderr.write(step.get("stderr", ""))
+sys.stderr.flush()
+if step.get("hold"):
+    time.sleep(step["hold"])
 sys.exit(step.get("code", 0))
 '''
 
@@ -99,8 +104,7 @@ class LaunchAgentTests(unittest.TestCase):
     def creation(self, existing=False):
         args = (["tab", "create", "--workspace", "w2"] if existing else
                 ["workspace", "create"])
-        args += ["--cwd", str(self.cwd), "--label",
-                 "worker" if existing else self.cwd.name, "--no-focus"]
+        args += ["--cwd", str(self.cwd), "--label", "worker", "--no-focus"]
         return step(args, response(
             "tab_created" if existing else "workspace_created",
             root_pane={key: self.agent[key] for key in (
@@ -120,14 +124,16 @@ class LaunchAgentTests(unittest.TestCase):
         return step(["agent", "read", "worker", "--source", "recent-unwrapped",
                      "--lines", "80", "--format", "text"], raw=text)
 
-    def happy_steps(self, existing=False, native=()):
-        steps = self.preflight() + [self.workspaces(["w2"] if existing else [])]
-        if existing:
-            steps += [self.panes()]
-        return steps + [self.creation(existing), self.start(native), self.read()]
+    def happy_steps(self, native=(), workspace=None):
+        steps = self.preflight()
+        if workspace:
+            steps += [self.panes(workspace), self.creation(existing=True)]
+        else:
+            steps += [self.creation(existing=False)]
+        return steps + [self.start(native), self.read()]
 
-    def prefix_steps(self, existing=False):
-        steps = self.happy_steps(existing=existing)
+    def prefix_steps(self, workspace=None):
+        steps = self.happy_steps(workspace=workspace)
         for item in steps:
             item["args"] = ["$GENERATED_NAME" if arg == "worker" else arg
                             for arg in item["args"]]
@@ -137,7 +143,8 @@ class LaunchAgentTests(unittest.TestCase):
             "agent_list", agents=[{"name": "worker"}]))
         return steps
 
-    def run_launcher(self, steps, extra=(), cwd=None, env=None, naming=None):
+    def run_launcher(self, steps, extra=(), cwd=None, env=None, naming=None,
+                     allow_prompt=False, timeout=15):
         self.steps_file.write_text(json.dumps(steps))
         if self.log.exists():
             self.log.write_text("")
@@ -146,17 +153,19 @@ class LaunchAgentTests(unittest.TestCase):
              *(naming if naming is not None else ["--name", "worker"]),
              "--kind", "pi", *extra],
             env=env or self.env, capture_output=True, text=True,
-            cwd=self.directory, timeout=15,
+            cwd=self.directory, timeout=timeout,
         )
         calls = ([json.loads(line) for line in self.log.read_text().splitlines()]
                  if self.log.exists() else [])
         self.assertNotIn("PRIVATE_PAYLOAD", result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+        forbidden = [["agent", "stop"], ["workspace", "delete"],
+                     ["tab", "close"], ["pane", "run"], ["agent", "wait"]]
+        if not allow_prompt:
+            forbidden.append(["agent", "prompt"])
         for call in calls:
             self.assertEqual(call[:2], ["--session", "Subagents"])
-            self.assertNotIn(call[2:4], [
-                ["agent", "prompt"], ["agent", "stop"], ["workspace", "delete"],
-                ["tab", "close"], ["pane", "run"], ["agent", "wait"]])
+            self.assertNotIn(call[2:4], forbidden)
         return result, calls
 
     def assert_success(self, result):
@@ -191,11 +200,15 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertEqual(calls, [item["args"] for item in steps])
         self.assertLess(len(result.stdout), 1000)
 
-    def test_existing_workspace_creates_one_unfocused_tab(self):
-        steps = self.happy_steps(existing=True)
+    def test_default_launch_does_not_reuse_a_directory_workspace(self):
+        steps = self.happy_steps()
         result, calls = self.run_launcher(steps)
         self.assert_success(result)
-        self.assertEqual(calls, [item["args"] for item in steps])
+        self.assertEqual(calls[2][2:4], ["workspace", "create"])
+        self.assertFalse(any(call[2:4] == ["workspace", "list"] for call in calls))
+        self.assertFalse(any(call[2:4] == ["pane", "list"] for call in calls))
+        self.assertFalse(any(call[2:4] == ["tab", "create"] for call in calls))
+        self.assertEqual(calls[2][calls[2].index("--label") + 1], "worker")
 
     def test_explicit_workspace_skips_global_workspace_discovery(self):
         steps = self.preflight() + [self.panes(), self.creation(True),
@@ -207,9 +220,9 @@ class LaunchAgentTests(unittest.TestCase):
     def test_symlink_directory_matches_live_foreground_cwd(self):
         alias = self.directory / "alias"
         alias.symlink_to(self.cwd, target_is_directory=True)
-        steps = self.happy_steps(existing=True)
-        steps[3] = self.panes(directories=[str(alias)])
-        result, _ = self.run_launcher(steps, cwd=alias)
+        steps = self.happy_steps(workspace="w2")
+        steps[2] = self.panes(directories=[str(alias)])
+        result, _ = self.run_launcher(steps, ["--workspace", "w2"], cwd=alias)
         self.assert_success(result)
 
     def test_native_arguments_are_forwarded_without_shell_evaluation(self):
@@ -221,20 +234,14 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertEqual(calls[-2][-len(native):], native)
         self.assertFalse((self.directory / "SHOULD_NOT_EXIST").exists())
 
-    def test_ambiguous_or_missing_directory_evidence_never_mutates(self):
-        variants = [
-            [self.workspaces(["w2", "w3"]), self.panes(), self.panes("w3")],
-            [self.workspaces(["w2"]), self.panes(directories=[None])],
-            [self.workspaces(["w2"]), self.panes(directories=[])],
-            [self.workspaces(["w2"]), self.panes(directories=["relative"])],
-            [self.workspaces(["w2", "w3"]), self.panes(),
-             self.panes("w3", [None])],
-        ]
-        for discovery in variants:
-            with self.subTest(discovery=discovery):
-                steps = self.preflight() + discovery
-                result, calls = self.run_launcher(steps)
-                self.assert_failure(result, "workspace")
+    def test_explicit_workspace_without_directory_evidence_never_mutates(self):
+        for panes in (self.panes(directories=[None]), self.panes(directories=[]),
+                      self.panes(directories=["relative"])):
+            with self.subTest(panes=panes):
+                steps = self.preflight() + [panes]
+                result, calls = self.run_launcher(steps, ["--workspace", "w2"])
+                data = self.assert_failure(result, "workspace")
+                self.assertFalse(data["mutation_may_have_taken_effect"])
                 self.assertEqual(calls, [item["args"] for item in steps])
 
     def test_explicit_workspace_must_match_directory(self):
@@ -243,13 +250,11 @@ class LaunchAgentTests(unittest.TestCase):
         self.assert_failure(result, "workspace")
         self.assertEqual(len(calls), 3)
 
-    def test_labels_and_stale_cwd_do_not_select_workspace(self):
-        steps = self.preflight() + [self.workspaces(["w1", "w2"]),
-                                   self.panes("w1", ["/elsewhere"]),
-                                   self.panes(), self.creation(True),
-                                   self.start(), self.read()]
-        result, _ = self.run_launcher(steps)
+    def test_default_launch_ignores_other_workspaces(self):
+        steps = self.happy_steps()
+        result, calls = self.run_launcher(steps)
         self.assert_success(result)
+        self.assertFalse(any(call[2:4] == ["workspace", "list"] for call in calls))
 
     def test_duplicate_agent_name_stops_before_discovery(self):
         steps = self.preflight()
@@ -264,11 +269,12 @@ class LaunchAgentTests(unittest.TestCase):
 
     def test_generated_names_are_fresh_and_used_for_all_launch_commands(self):
         names = []
-        for existing in (False, True):
-            with self.subTest(existing=existing):
-                steps = self.prefix_steps(existing=existing)
+        for workspace in (None, "w2"):
+            with self.subTest(workspace=workspace):
+                extra = ["--workspace", workspace] if workspace else []
+                steps = self.prefix_steps(workspace=workspace)
                 result, calls = self.run_launcher(
-                    steps, naming=["--name-prefix", "worker"])
+                    steps, extra, naming=["--name-prefix", "worker"])
                 name = self.assert_success(result)["name"]
                 self.assertRegex(name, r"^worker-[0-9a-f]{12}$")
                 names.append(name)
@@ -287,7 +293,7 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertTrue(data["mutation_may_have_taken_effect"])
         self.assertRegex(data["requested_name"], r"^worker-[0-9a-f]{12}$")
         self.assertEqual(data["requested_name"], calls[-1][4])
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(data["resources"]["pane_id"], "w2:p1")
 
     def test_name_generation_checks_registry_and_is_bounded(self):
@@ -347,9 +353,9 @@ class LaunchAgentTests(unittest.TestCase):
         self.assert_success(result)
 
     def test_multiple_matching_panes_are_one_workspace_not_ambiguity(self):
-        steps = self.happy_steps(existing=True)
-        steps[3] = self.panes(directories=[str(self.cwd), None, str(self.cwd)])
-        result, _ = self.run_launcher(steps)
+        steps = self.happy_steps(workspace="w2")
+        steps[2] = self.panes(directories=[str(self.cwd), None, str(self.cwd)])
+        result, _ = self.run_launcher(steps, ["--workspace", "w2"])
         self.assert_success(result)
 
     def test_server_or_protocol_failure_stops_before_mutations(self):
@@ -423,7 +429,7 @@ class LaunchAgentTests(unittest.TestCase):
                 self.assertEqual(data["startup_empty"], not bool(text.strip()))
 
     def test_failures_at_every_stage_never_retry_or_echo_raw_errors(self):
-        stages = ["server", "name", "workspace", "create", "start", "inspect"]
+        stages = ["server", "name", "create", "start", "inspect"]
         happy = self.happy_steps()
         for index, stage in enumerate(stages):
             for failure in ({"output": "PRIVATE_PAYLOAD", "code": 1},
@@ -440,8 +446,8 @@ class LaunchAgentTests(unittest.TestCase):
                     data = self.assert_failure(result, stage)
                     self.assertEqual(calls, [item["args"] for item in steps])
                     self.assertEqual(data["mutation_may_have_taken_effect"],
-                                     index >= 3)
-                    if index >= 4:
+                                     index >= 2)
+                    if index >= 3:
                         self.assertEqual(data["resources"]["pane_id"], "w2:p1")
 
     def test_claude_and_custom_timeout_keep_the_same_launch_contract(self):
@@ -485,18 +491,20 @@ class LaunchAgentTests(unittest.TestCase):
                 self.assertEqual(calls[-2][-len(native):], native)
 
     def test_busy_shell_then_ready_reuses_the_same_fresh_pane_and_name(self):
-        for existing in (False, True):
-            with self.subTest(existing=existing):
-                steps = self.prefix_steps(existing=existing)
+        for workspace in (None, "w2"):
+            with self.subTest(workspace=workspace):
+                steps = self.prefix_steps(workspace=workspace)
                 start = steps[-2]
                 start["args"] += ["--", "--thinking", "high"]
                 busy = {**start, "output": "", "code": 1, "stderr": json.dumps({
                     "id": "cli:agent:start", "error": {
                         "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}})}
                 steps[-2:-1] = [busy, busy, start]
+                extra = ["--", "--thinking", "high"]
+                if workspace:
+                    extra = ["--workspace", workspace, *extra]
                 result, calls = self.run_launcher(
-                    steps, ["--", "--thinking", "high"],
-                    naming=["--name-prefix", "worker"])
+                    steps, extra, naming=["--name-prefix", "worker"])
                 data = self.assert_success(result)
                 starts = [call for call in calls if call[2:4] == ["agent", "start"]]
                 self.assertEqual(len(starts), 3)
@@ -562,7 +570,7 @@ class LaunchAgentTests(unittest.TestCase):
                 result, calls = self.run_launcher(steps)
                 data = self.assert_failure(result, "start")
                 self.assertTrue(data["mutation_may_have_taken_effect"])
-                self.assertEqual(len(calls), 6)
+                self.assertEqual(len(calls), 5)
                 self.assertEqual(calls[-1], calls[-2])
 
     def test_busy_wait_is_bounded_and_retains_created_resources(self):
@@ -570,7 +578,7 @@ class LaunchAgentTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         clock = [0.0]
-        initial = iter(self.happy_steps()[:4])
+        initial = iter(self.happy_steps()[:3])
         busy = json.dumps({"id": "cli:agent:start", "error": {
             "code": "agent_pane_busy", "message": "PRIVATE_PAYLOAD"}})
 
@@ -587,7 +595,7 @@ class LaunchAgentTests(unittest.TestCase):
         with patch.object(module, "SHELL_READY_TIMEOUT", 0.25), \
              patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(module.time, "sleep", side_effect=sleep), \
-             patch.object(module.subprocess, "run", side_effect=run) as process, \
+             patch.object(module, "run_bounded", side_effect=run) as process, \
              patch.object(module.shutil, "which", return_value="herdr"), \
              patch.object(module.sys, "stdout") as stdout, \
              patch.object(module.sys, "stderr") as stderr:
@@ -609,7 +617,7 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertTrue(all(call == starts[0] for call in starts))
 
     def test_busy_error_outside_start_never_retries(self):
-        for index, stage in ((3, "create"), (5, "inspect")):
+        for index, stage in ((2, "create"), (4, "inspect")):
             with self.subTest(stage=stage):
                 steps = self.happy_steps()[:index + 1]
                 steps[-1].update(output="", code=1, stderr=json.dumps({
@@ -660,7 +668,7 @@ class LaunchAgentTests(unittest.TestCase):
         for root in ({"workspace_id": "w2", "tab_id": "w2:t1"},
                      {"pane_id": "w2:p1"}, None):
             with self.subTest(root=root):
-                steps = self.happy_steps()[:4]
+                steps = self.happy_steps()[:3]
                 steps[-1]["output"] = json.dumps(response(
                     "workspace_created", workspace={"workspace_id": "w2"},
                     tab={"tab_id": "w2:t1"}, root_pane=root))
@@ -670,15 +678,15 @@ class LaunchAgentTests(unittest.TestCase):
                 self.assertEqual(data["resources"]["tab_id"], "w2:t1")
                 if root and "pane_id" in root:
                     self.assertEqual(data["resources"]["pane_id"], "w2:p1")
-                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(calls), 3)
 
     def test_conflicting_creation_workspace_never_starts_agent(self):
-        steps = self.happy_steps(existing=True)[:5]
+        steps = self.happy_steps(workspace="w2")[:4]
         steps[-1]["output"] = json.dumps(response("tab_created", root_pane={
             "workspace_id": "w9", "tab_id": "w9:t1", "pane_id": "w9:p1"}))
-        result, calls = self.run_launcher(steps)
+        result, calls = self.run_launcher(steps, ["--workspace", "w2"])
         self.assert_failure(result, "create")
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 4)
 
     def test_incomplete_get_is_not_retried(self):
         for metadata in ({}, {**self.agent, "interactive_ready": False}, None):
@@ -689,7 +697,7 @@ class LaunchAgentTests(unittest.TestCase):
                     "agent_info", agent=metadata))]
                 result, calls = self.run_launcher(steps)
                 self.assert_failure(result, "start")
-                self.assertEqual(len(calls), 6)
+                self.assertEqual(len(calls), 5)
 
     def test_invalid_session_mapping_falls_back_without_echoing_metadata(self):
         for mapping in ({"kind": "future", "value": "PRIVATE_PAYLOAD"},
@@ -699,31 +707,27 @@ class LaunchAgentTests(unittest.TestCase):
                 self.agent["agent_session"] = mapping
                 result, calls = self.run_launcher(self.happy_steps())
                 self.assertIsNone(self.assert_success(result)["session"])
-                self.assertEqual(len(calls), 6)
+                self.assertEqual(len(calls), 5)
 
     def test_unsupported_discovery_shapes_stop_without_creating_resources(self):
-        for index, payload in (
-            (1, response("agent_list", agents=[{}])),
-            (1, response("agent_list", agents="PRIVATE_PAYLOAD")),
-            (2, response("workspace_list", workspaces=[{"workspace_id": "--bad"}])),
-            (2, response("workspace_list", workspaces=[{"workspace_id": "w2"}] * 2)),
-            (3, response("pane_list", panes=[{"workspace_id": "w9"}])),
-            (3, response("pane_list", panes=[None])),
-        ):
-            with self.subTest(index=index, payload=payload):
-                steps = self.happy_steps(existing=True)[:index + 1]
+        for payload in (response("agent_list", agents=[{}]),
+                        response("agent_list", agents="PRIVATE_PAYLOAD")):
+            with self.subTest(payload=payload):
+                steps = self.happy_steps()[:2]
                 steps[-1]["output"] = json.dumps(payload)
                 result, calls = self.run_launcher(steps)
-                data = self.assert_failure(result, "name" if index == 1 else "workspace")
+                data = self.assert_failure(result, "name")
                 self.assertFalse(data["mutation_may_have_taken_effect"])
                 self.assertEqual(len(calls), len(steps))
-
-    def test_new_workspace_after_known_nonmatching_directories(self):
-        steps = self.preflight() + [self.workspaces(["w1"]),
-                                   self.panes("w1", ["/elsewhere"]),
-                                   self.creation(), self.start(), self.read()]
-        result, _ = self.run_launcher(steps)
-        self.assert_success(result)
+        for payload in (response("pane_list", panes=[{"workspace_id": "w9"}]),
+                        response("pane_list", panes=[None])):
+            with self.subTest(payload=payload):
+                steps = self.preflight() + [self.panes()]
+                steps[-1]["output"] = json.dumps(payload)
+                result, calls = self.run_launcher(steps, ["--workspace", "w2"])
+                data = self.assert_failure(result, "workspace")
+                self.assertFalse(data["mutation_may_have_taken_effect"])
+                self.assertEqual(len(calls), len(steps))
 
     def test_transport_failures_have_bounded_diagnostics(self):
         spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
@@ -732,7 +736,7 @@ class LaunchAgentTests(unittest.TestCase):
         for error in (OSError("PRIVATE_PAYLOAD"), ValueError("PRIVATE_PAYLOAD"),
                       UnicodeError("PRIVATE_PAYLOAD"), KeyboardInterrupt()):
             with self.subTest(error=type(error).__name__):
-                with patch.object(module.subprocess, "run", side_effect=error), \
+                with patch.object(module, "run_bounded", side_effect=error), \
                      patch.object(module.shutil, "which", return_value="herdr"), \
                      patch.object(module.sys, "stderr") as stderr:
                     code = module.main(["--cwd", str(self.cwd), "--name",
@@ -747,14 +751,14 @@ class LaunchAgentTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("launcher", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        for index in range(6):
+        for index in range(5):
             with self.subTest(index=index):
                 responses = [subprocess.CompletedProcess(
                     item["args"], 0, item["output"], "")
                     for item in self.happy_steps()[:index]]
                 responses.append(subprocess.TimeoutExpired(
                     "herdr", 1, output="PRIVATE_PAYLOAD"))
-                with patch.object(module.subprocess, "run", side_effect=responses) as run, \
+                with patch.object(module, "run_bounded", side_effect=responses) as run, \
                      patch.object(module.shutil, "which", return_value="herdr"), \
                      patch.object(module.sys, "stdout") as stdout, \
                      patch.object(module.sys, "stderr") as stderr:
@@ -765,10 +769,123 @@ class LaunchAgentTests(unittest.TestCase):
                 output = "".join(call.args[0] for call in stderr.write.call_args_list)
                 self.assertNotIn("PRIVATE_PAYLOAD", output)
                 self.assertEqual(json.loads(output)["mutation_may_have_taken_effect"],
-                                 index >= 3)
+                                 index >= 2)
                 self.assertEqual(run.call_count, index + 1)
                 self.assertTrue(all(call.kwargs["timeout"] > 0
                                     for call in run.call_args_list))
+
+
+    def prompt_steps(self, text="Ready\n", prompt="Review the diff"):
+        steps = self.happy_steps()
+        steps[-1] = self.read(text)
+        steps.append(step(
+            ["agent", "prompt", "worker", prompt],
+            response("agent_prompted", agent={**self.agent, "agent_status": "done"})))
+        return steps
+
+    def test_startup_read_stops_without_buffering_a_held_stream(self):
+        steps = self.happy_steps()
+        steps[-1] = {**self.read("x" * 100000), "hold": 60}
+        started = time.monotonic()
+        result, _ = self.run_launcher(steps, timeout=8)
+        data = self.assert_success(result)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue(data["startup_truncated"])
+        self.assertLessEqual(len(data["startup"]), 8000)
+        self.assertNotIn("x" * 9000, result.stdout)
+
+    def test_prompt_is_submitted_once_and_not_echoed(self):
+        prompt = "Review the diff\nDO_NOT_ECHO"
+        steps = self.prompt_steps(prompt=prompt)
+        result, calls = self.run_launcher(
+            steps, ["--prompt", prompt], allow_prompt=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["state"], "done")
+        self.assertTrue(data["submitted"])
+        self.assertIsNone(data["submission_blocked"])
+        self.assertFalse(data["inspection_required"])
+        self.assertNotIn("startup", data)
+        self.assertNotIn("DO_NOT_ECHO", result.stdout)
+        prompts = [call for call in calls if call[2:4] == ["agent", "prompt"]]
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0][5], prompt)
+        self.assertNotIn("--wait", prompts[0])
+
+    def test_unsafe_or_incomplete_startup_never_submits(self):
+        cases = {
+            "startup_empty": "",
+            "startup_truncated": "x" * 20000,
+            "startup_unsafe": "Authentication required\nWrong model loaded\n> Human draft",
+        }
+        for code, text in cases.items():
+            with self.subTest(code=code):
+                steps = self.happy_steps()
+                steps[-1] = self.read(text)
+                result, calls = self.run_launcher(steps, ["--prompt", "go"])
+                data = self.assert_success(result)
+                self.assertFalse(data["submitted"])
+                self.assertEqual(data["submission_blocked"], code)
+                self.assertTrue(data["inspection_required"])
+                self.assertIn("startup", data)
+                self.assertFalse(any(call[2:4] == ["agent", "prompt"] for call in calls))
+
+    def test_prompt_failure_is_not_retried(self):
+        steps = self.prompt_steps()[:-1]
+        steps.append({**self.prompt_steps()[-1], "code": 1, "output": "",
+                      "stderr": json.dumps({"id": "cli:agent:prompt", "error": {
+                          "code": "agent_prompt_failed", "message": "PRIVATE_PAYLOAD"}})})
+        result, calls = self.run_launcher(
+            steps, ["--prompt", "Review the diff"], allow_prompt=True)
+        data = self.assert_failure(result, "prompt")
+        self.assertEqual(data["herdr_code"], "agent_prompt_failed")
+        self.assertTrue(data["mutation_may_have_taken_effect"])
+        self.assertEqual(data["resources"]["name"], "worker")
+        self.assertEqual(sum(call[2:4] == ["agent", "prompt"] for call in calls), 1)
+
+    def test_prompt_file_and_wait_are_forwarded_once(self):
+        prompt_path = self.directory / "prompt.txt"
+        prompt_path.write_text("Café review\n", encoding="utf-8")
+        steps = self.happy_steps()
+        steps[-1] = self.read("Ready\n")
+        steps.append(step(
+            ["agent", "prompt", "worker", "Café review\n", "--wait", "--timeout", "1500"],
+            response("agent_prompted", agent={**self.agent, "agent_status": "idle"})))
+        result, calls = self.run_launcher(
+            steps, ["--prompt-file", str(prompt_path), "--wait-timeout", "1500"],
+            allow_prompt=True)
+        data = self.assert_success(result)
+        self.assertTrue(data["submitted"])
+        self.assertTrue(data["waited"])
+        self.assertNotIn("response", data)
+        self.assertEqual(calls[-1][-4:], ["Café review\n", "--wait", "--timeout", "1500"])
+
+    def test_settled_wait_extracts_the_mapped_answer(self):
+        session = self.directory / "session.jsonl"
+        session.write_text(json.dumps({"type": "message", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "Hello World"}]
+        }}) + "\n", encoding="utf-8")
+        self.agent["agent_session"]["value"] = str(session)
+        steps = self.prompt_steps()
+        steps[-1]["args"] += ["--wait", "--timeout", "1500"]
+        result, _ = self.run_launcher(
+            steps, ["--prompt", "Review the diff", "--wait-timeout", "1500"],
+            allow_prompt=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["response"], "Hello World")
+        self.assertNotIn("DO_NOT_ECHO", result.stdout)
+
+    def test_missing_prompt_file_never_calls_herdr(self):
+        result, calls = self.run_launcher(
+            [], ["--prompt-file", str(self.directory / "missing.txt")])
+        self.assert_failure(result, "input")
+        self.assertEqual(calls, [])
+
+    def test_wait_timeout_without_prompt_never_calls_herdr(self):
+        result, calls = self.run_launcher([], ["--wait-timeout", "1000"])
+        self.assert_failure(result, "input")
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

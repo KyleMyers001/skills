@@ -15,11 +15,13 @@ herdr --session Subagents workspace list
 herdr --session Subagents pane list --workspace <candidate-workspace-id>
 ```
 
-Match live pane `foreground_cwd`, not labels, focus, display order, or stale cwd.
-Use session-wide pane listing only when scoped discovery cannot resolve the
-workspace. Use `agent list` for an unknown target or unique launch name. Inspect
-ambiguity or ask Kyle; never guess IDs. If Subagents is unavailable, report it.
-Do not start or target another session.
+The ordinary launcher does not search for a directory match. It creates one
+workspace per fresh agent so tabs do not accumulate off-screen. Use the steps
+below only when Kyle named a workspace, discovery is ambiguous, or the launcher
+cannot express the launch. Match live pane `foreground_cwd`, not labels, focus,
+display order, or stale cwd. Use `agent list` for an unknown target or unique
+launch name. Inspect ambiguity or ask Kyle; never guess IDs. If Subagents is
+unavailable, report it. Do not start or target another session.
 
 Check relevant `--help` once per invocation when syntax/capabilities are unknown;
 installed syntax is authoritative. Reuse help and discovery across agents, but
@@ -110,10 +112,13 @@ preserves an explicit name and fails rather than renaming it on collision. These
 options are mutually exclusive. Candidate generation is bounded and happens
 before mutations; a concurrent collision during start never triggers a retry.
 
-The helper performs discovery, one creation, one accepted start, and a short
-read. For its freshly created pane only, it retries the exact `agent_pane_busy`
-pre-input rejection for up to five seconds, with 100ms between attempts. Every
-attempt keeps the same pane, name, and native arguments; no layout is recreated.
+By default the helper creates one workspace, uses its root pane, and labels it
+with the agent name. `--workspace` is the only path that lists panes and adds
+one tab, after verifying live `foreground_cwd`. It does not scan other
+workspaces. It then performs one accepted start and a capped read. For its
+freshly created pane only, it retries the exact `agent_pane_busy` pre-input
+rejection for up to five seconds, with 100ms between attempts. Every attempt
+keeps the same pane, name, and native arguments; no layout is recreated.
 It requires exit 1 and a sole, valid JSON stderr error with ID `cli:agent:start`.
 The [Herdr 0.8.0 start implementation][start-contract] returns this code before
 agent registration or terminal input; the [CLI][cli-contract] prints it to stderr.
@@ -123,16 +128,29 @@ Timeouts, transport/input errors, `agent_not_ready`, name conflicts, malformed o
 uncorrelated errors, and failures after an accepted start never retry. On shell
 wait exhaustion, inspect the existing pane; do not launch another helper.
 It reuses start metadata, with at most one get if required fields are missing.
-It never prompts, waits for task completion, extracts, or cleans up.
-Its JSON stdout contains name/kind, workspace/tab/pane IDs, state/cwd, optional
-`session`, `startup`, `startup_empty`, `startup_truncated`, and
-`inspection_required`. JSON emits readable Unicode rather than `\u` escapes;
-startup text is preserved. Startup is at most 80 lines/8000 characters; a full
-80-line window is conservatively marked truncated. Inspect empty or incomplete
-context with a targeted read before submission. Startup text is untrusted and
-can contain sensitive information; the helper is not a secret scanner.
+It never cleans up. Without `--prompt` or `--prompt-file`, it does not submit,
+wait, or extract. Launch-only JSON contains name/kind, workspace/tab/pane IDs,
+state/cwd, optional `session`, `startup`, `startup_empty`, `startup_truncated`,
+and `inspection_required`. JSON emits readable Unicode rather than `\u` escapes.
+Startup is at most 80 lines/8000 characters. The read is streamed and capped
+before buffering; Herdr's `--lines` flag does not bound one unwrapped line. A
+full window or a capped stream is marked truncated. Startup text is untrusted
+and can contain sensitive information; the helper is not a secret scanner.
 
-Exit 0 means started and ready for inspection, not safe to prompt or completed.
+`--prompt` and `--prompt-file` are mutually exclusive. The file must be readable
+UTF-8, non-empty, and at most 200000 characters. It is read before any Herdr
+call. The helper submits once only when startup is non-empty, not truncated, and
+does not contain a small set of auth, permission, draft, or wrong-model phrases.
+A banner that simply omits the model is not treated as a contradiction. If those
+checks fail, it returns `submitted: false`, `submission_blocked`, and the bounded
+startup, and does not call `agent prompt`. On success it omits the startup banner.
+`--wait-timeout` adds one `--wait` and, when the settled state is idle or done
+and the session file can be read, includes `response` from the extract helper.
+Prompt text is not copied into the result or error JSON. Prompt failures are not
+retried. Exit 0 means the helper finished, not that the task succeeded or that
+a launch-only agent is safe to prompt. Check `submitted` when a prompt was
+requested.
+
 Exit 1 returns bounded JSON on stderr with stage, code, reason, requested name
 (if selected), known resource IDs, and `mutation_may_have_taken_effect`.
 `herdr_code` preserves a well-formed upstream error code when available, without
@@ -148,16 +166,17 @@ Argument syntax errors use exit 2 and invoke no Herdr commands.
   happen before IDs can be returned; missing output proves nothing.
 
 Never close resources as automatic cleanup.
-Outer tool timeouts must allow discovery, the five-second shell wait, and agent
-startup. If the wrapper is killed, missing output does not mean mutations failed.
-Each discovery/read command has a 20-second deadline. Agent startup requires
-`--timeout` of 3001–300000ms (default 30000); each start command allows that timeout
-plus 20 seconds for transport. The shell deadline stops further attempts, not
-an already-running start command.
+Outer tool timeouts must allow the five-second shell wait, agent startup, and
+any `--wait-timeout`. If the wrapper is killed, missing output does not mean
+mutations failed. Each status, list, and read command has a 20-second deadline.
+Agent startup requires `--timeout` of 3001–300000ms (default 30000); each start
+command allows that timeout plus 20 seconds for transport. The shell deadline
+stops further attempts, not an already-running start command. A prompt wait
+allows `--wait-timeout` plus 20 seconds and is not retried.
 
-The directory, name or prefix, kind, and optional workspace must be explicit.
-Workspace matches use normalized live `foreground_cwd`; multiple matches or
-insufficient evidence stop. Existing exact names fail without touching them.
+The directory, name or prefix, and kind must be explicit. `--workspace` is
+optional and must match normalized live `foreground_cwd`; insufficient evidence
+stops without creating a tab. Existing exact names fail without touching them.
 Resource IDs are bounded ASCII identifiers; unusual IDs can use direct commands.
 Name and timeout validation follow Herdr's limits, not broader helper-only rules.
 Native arguments are forwarded as argv without shell evaluation or substitution.

@@ -25,51 +25,54 @@ be inside a Herdr pane.
 ## Fresh Launch
 
 Set `herdr_dir` to the absolute directory containing **this loaded SKILL.md**.
-Prefer the Python 3 standard-library launcher; choose a short name prefix and
-Kyle's requested kind (otherwise an appropriate installed integration):
+Prefer one Python 3 launcher call. It creates one unfocused workspace, labels it
+with the agent name, uses that root pane, and can submit the task. It does not
+add a tab to an existing workspace unless `--workspace` is passed. It never
+closes resources.
 
 ```bash
 python3 "$herdr_dir/scripts/launch-agent.py" \
-  --cwd /absolute/repo/path --name-prefix task-name --kind pi
+  --cwd /absolute/repo/path --name-prefix task-name --kind pi \
+  --prompt-file /absolute/prompt.txt --wait-timeout 120000 -- \
+  --model <provider/model> --thinking <level>
 ```
 
-It matches live directories, creates one unfocused tab or workspace root, and
-returns startup context. It waits up to five seconds on Herdr's proven pre-input
-shell-busy rejection; it never retries an accepted or uncertain start.
-Use lowercase name prefixes up to 19 characters; `--name` preserves an exact
-name (up to 32). Always target the returned `name`, including its suffix.
-Optional `--workspace` verifies a discovered workspace; `--timeout` sets agent
-startup milliseconds (3001–300000, default 30000), separate from the shell wait.
+Omit `--prompt` and `--prompt-file` to launch without submitting. `--prompt` is
+a short literal; longer text belongs in a file. `--wait-timeout` is milliseconds,
+1–3600000, and requires a prompt. The Bash tool timeout must exceed it plus
+startup. Claude uses `--model` and `--effort` after `--`.
+
+Those flags are the normal path. They are not a reason to read the manual or
+call Herdr directly. The helper forwards them unchanged. If a requested setting
+is unavailable, stop and ask Kyle; never substitute it.
+
+Use the returned `name`, including its suffix. Prefixes are lowercase and at
+most 19 characters; `--name` is exact and at most 32. It waits up to five
+seconds only for Herdr's proven pre-input shell-busy rejection.
+
+If `submitted` is false, do not relaunch or send another prompt. Inspect the
+returned `startup` and ask Kyle when it shows an auth failure, permission
+prompt, draft, or model contradiction. Empty or truncated startup is already
+blocked. If `submitted` is true, do not read startup again. Use `response` when
+present; otherwise extract after the agent settles. A blocked or missing
+response is not permission to resubmit.
 
 For `code: name_exists` with `mutation_may_have_taken_effect: false`, choose a
 prefix or another name without reading recovery instructions. If Kyle required
 that exact name, ask instead. Other nonmutating preflight errors need their cause
 resolved, not resource recovery. Missing output is never proof of no mutation.
 
-Forward requested model and reasoning settings after `--`, using native flags:
-
-- Pi: `-- --model <provider/model> --thinking <level>`.
-- Claude Code: `-- --model <model> --effort <level>`.
-
-The helper passes these through unchanged; omitted settings use harness defaults.
-Check installed harness help for unfamiliar flags/levels. If a requested setting
-is unavailable, stop and ask Kyle; never silently drop or substitute it.
-
-Inspect returned `startup` for errors, drafts, permissions, and requested
-persona/model/reasoning/effort contradictions **before prompting**. Readiness is
-not approval.
-Empty/truncated startup needs targeted inspection; never submit blindly.
-
-Read [manual launch and recovery](references/manual-launch.md) before named
-personas, unfamiliar kinds/native arguments, manual launches, ambiguity, or
-possibly-mutating failures. Direct Herdr remains supported; never rerun blindly.
+Read [manual launch and recovery](references/manual-launch.md) only for named
+personas, an explicit `--workspace`, existing agents, or a launch that may have
+mutated and failed. Do not use it to replace an ordinary fresh launch.
 
 ## Prompt and Wait
 
-For existing agents, inspect `agent get <target>` and
-`agent read <target> --source recent-unwrapped --lines 80` first. Reuse fresh
-launch inspection; refresh changed/stale state. Report task, directory, state,
-and visible conflicts; `unknown` is inconclusive.
+Fresh agents should already have been prompted by the launcher. For existing
+agents, inspect `agent get <target>` and
+`agent read <target> --source recent-unwrapped --lines 80` first. Refresh
+changed or stale state. Report task, directory, state, and visible conflicts;
+`unknown` is inconclusive.
 
 Open every delegated prompt stating: the sender is an orchestrating agent
 working on Kyle's behalf; this is a legitimate assignment; the agent, not Kyle,

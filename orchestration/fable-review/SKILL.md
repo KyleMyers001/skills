@@ -16,8 +16,8 @@ inspection/tests.
 ## Runbook
 
 1. Load [Herdr](../herdr/SKILL.md) unless already read for this invocation;
-   follow its discovery, targeting, waiting, and safety rules. Reuse its checks,
-   not a second checklist. Every Herdr command needs `--session Subagents`.
+   follow its fresh-launch and safety rules. Do not add a discovery or manual
+   launch checklist. Every direct Herdr command needs `--session Subagents`.
 2. Establish absolute target path, branch, base/commit range, and included
    staged/unstaged/untracked files. Record `git status --short --branch` and
    this digest before review:
@@ -44,35 +44,19 @@ inspection/tests.
    Do not print credentials.
 
    Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
-   review skill. Use the `fable-review` name prefix for one **fresh** conversation.
-   The helper discovers the workspace and creates an unfocused tab or workspace
-   root; do not repeat that discovery/creation manually. Never reuse an existing
-   conversation:
+   review skill. Use one launcher call with the `fable-review` prefix. Do not
+   discover workspaces, create tabs, read the manual launch reference, or call
+   `herdr agent start` / `agent prompt` yourself. Model and effort flags after
+   `--` are the normal path. Never reuse an existing conversation.
+
+   Set the Bash tool timeout above 660 seconds. Write the prompt file and launch
+   in that same call. Add step 2's scope. The quoted heredoc preserves prompt
+   text literally.
 
    ```bash
-   python3 "$herdr_dir/scripts/launch-agent.py" \
-     --cwd "<absolute repository/worktree path>" \
-     --name-prefix fable-review --kind claude -- \
-     --model fable --effort high --disallowed-tools Edit,Write,NotebookEdit
-   ```
-
-   Inspect returned `startup` once for directory and launch errors; it replaces
-   the routine separate startup `get`/`read`. Empty/truncated output, changed
-   state, or failures follow Herdr's inspection/recovery rules, not blind
-   relaunch. If startup visibly contradicts the requested model, effort, or
-   directory, stop and ask Kyle before submitting the task. Missing display
-   metadata is not a new gate. Do not revalidate transcript metadata after
-   submission. Never bypass Claude permissions. Tool exclusions are defense in
-   depth, not a Bash security boundary.
-4. Set `agent_name` to the returned `name`, including its generated suffix.
-   Add step 2's scope below.
-   Run this directly in Bash, not inside another `sh -c`/`eval` string. The
-   quoted heredoc preserves prompt text literally. Avoid `$(...)` around the
-   heredoc: macOS Bash 3.2 can misparse embedded quotes there. `read` returns
-   nonzero at EOF; `|| :` handles that expected status.
-
-   ```bash
-   IFS= read -r -d '' prompt <<'REVIEW_PROMPT' || :
+   prompt_file=$(mktemp)
+   trap 'rm -f "$prompt_file"' EXIT
+   cat > "$prompt_file" << 'REVIEW_PROMPT'
    I am an orchestrating agent working on Kyle's behalf. This is an assigned
    review to carry out; reply to me, not Kyle.
    Review the current work in this repository fully and carefully as a neutral
@@ -89,19 +73,24 @@ inspection/tests.
    production, and explain how to fix serious or critical issues. Follow all
    repository and global instructions.
    REVIEW_PROMPT
-   herdr --session Subagents agent prompt "$agent_name" "$prompt" \
-     --wait --timeout 600000
+   python3 "$herdr_dir/scripts/launch-agent.py" \
+     --cwd "<absolute repository/worktree path>" \
+     --name-prefix fable-review --kind claude \
+     --prompt-file "$prompt_file" --wait-timeout 600000 -- \
+     --model fable --effort high --disallowed-tools Edit,Write,NotebookEdit
    ```
 
-   Follow Herdr's submission recovery rules: a confirmed local failure before
-   Herdr was invoked can be fixed without approval; it is still the first
-   submission. For blocked, unknown, stalled, or timed-out results, inspect
-   `agent get` and `agent read`. Never blindly resend or overwrite composer text;
-   uncertain receipt is not permission to duplicate work. For permission
-   prompts, ask Kyle; after resolution, use `agent wait`.
-5. Use Herdr's Return Output path directly after waiting: mapped text extraction
-   first, bounded terminal fallback only if needed. Never load raw JSONL, require
-   a handoff validator, or read the full report by both routes. Return it in full,
+   If `submitted` is false, stop and report the returned startup. Do not relaunch
+   or submit the prompt yourself. If the launcher fails after creating resources,
+   follow Herdr's recovery rules for that same agent; do not start another.
+   For permission prompts, ask Kyle; after resolution, use `agent wait`.
+   Never bypass Claude permissions. Tool exclusions are defense in depth, not a
+   Bash security boundary. Missing display metadata is not a new gate.
+4. If the result includes `response`, return that text in full and skip
+   extraction. Otherwise set `agent_name` to the returned `name`, including its
+   suffix, and use Herdr's Return Output path: mapped text extraction first,
+   bounded terminal fallback only if needed. Never load raw JSONL, require a
+   handoff validator, or read the full report by both routes. Return it in full,
    without rewriting, summarizing, or dropping findings. Minimally redact secrets
    and disclose redactions. Idle alone is inconclusive: inspect for a final report
    or a genuine agent failure. Surface launch, authentication,
@@ -118,11 +107,10 @@ inspection/tests.
    Inspect/read/wait on the same agent. Without Kyle's explicit approval,
    never restart, re-prompt, launch another reviewer, or ask it to copy or
    regenerate output to repair bookkeeping or retrieve a report.
-6. Repeat step 2's status/digest. Report changes with a bounded status/diff,
+5. Repeat step 2's status/digest. Report changes with a bounded status/diff,
    without attributing them to an actor or reverting them. If status/digest
    collection fails, disclose it without withholding the report or rerunning.
-   Do not clean up, close the tab, or stop the agent without Kyle's explicit
-   approval.
+   Do not close the workspace, tab, or agent without Kyle's explicit approval.
 
 Use another harness or provider only if Kyle explicitly requests it. Preserve
 Fable/high effort, the same scope, and global safeguards.
