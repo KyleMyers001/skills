@@ -75,7 +75,7 @@ available for inspection/tests.
      --cwd "<absolute repository/worktree path>" \
      --name-prefix astra-review --kind pi \
      --prompt-file "$prompt_file" --wait-timeout 300000 \
-     --expect-startup gpt-6-astra --expect-startup "thinking: high" -- \
+     --expect-startup gpt-6-astra --expect-startup "gpt-6-astra • high" -- \
      --model openai-codex/gpt-6-astra --thinking high \
      --exclude-tools edit,write
    ```
@@ -88,8 +88,9 @@ available for inspection/tests.
    or submit the prompt yourself. If the launcher fails after creating resources,
    follow Herdr's recovery rules for that same agent; do not start another.
    Excluding tools is defense in depth, not a Bash security boundary. Missing
-   display metadata beyond the required model and `thinking: high` evidence is
-   not a new gate. Missing either required signal blocks submission.
+   display metadata beyond the required model and contiguous Pi footer
+   `gpt-6-astra • high` is not a new gate. Missing either required signal blocks
+   submission; unrelated `high` text is not reasoning evidence.
 4. If the result includes `response`, return that text in full and skip
    extraction. Otherwise set `agent_name` to the returned `name`, including its
    suffix, and use Herdr's Return Output path: mapped text extraction first,

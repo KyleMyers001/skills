@@ -207,14 +207,17 @@ class StartupTests(unittest.TestCase):
         self.assertIsNone(checks.submission_block("Ready", False, []))
 
     def test_astra_model_alone_does_not_satisfy_high_thinking_gate(self):
-        expected = ["gpt-6-astra", "thinking: high"]
-        for level in ("low", "medium", "off"):
-            with self.subTest(level=level):
-                self.assertEqual(checks.submission_block(
-                    f"gpt-6-astra • thinking: {level}", False, expected),
-                    "startup_unexpected")
+        expected = ["gpt-6-astra", "gpt-6-astra • high"]
+        # Pi 0.99.2 uses "thinking off" only when reasoning is disabled.
+        for text in ("gpt-6-astra • low", "gpt-6-astra • medium",
+                     "gpt-6-astra • thinking off", "gpt-6-astra",
+                     "other-model • high",
+                     "gpt-6-astra • low\nExtension status: high"):
+            with self.subTest(text=text):
+                self.assertEqual(checks.submission_block(text, False, expected),
+                                 "startup_unexpected")
         self.assertIsNone(checks.submission_block(
-            "GPT-6-ASTRA • THINKING: HIGH", False, expected))
+            "GPT-6-ASTRA • HIGH", False, expected))
 
 
 if __name__ == "__main__":

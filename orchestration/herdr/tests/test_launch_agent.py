@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import sys
@@ -932,6 +933,45 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertEqual(data["submission_blocked"], "startup_unexpected")
         self.assertIn("Sonnet 5.5", data["startup"])
         self.assertFalse(any(call[2:4] == ["agent", "prompt"] for call in calls))
+
+    def test_astra_runbook_footer_gates_exactly_one_prompt(self):
+        path = SCRIPTS.parents[1] / "astra-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        command = text.split('   python3 "$herdr_dir/scripts/launch-agent.py"', 1)[1]
+        command = command.split("```", 1)[0].replace("\\\n", " ")
+        args = cli.parse_args(shlex.split(command))
+        expect = [arg for value in args.expect_startup
+                  for arg in ("--expect-startup", value)]
+        # Pi 0.99.2 footer, not the synthetic "thinking: high" banner.
+        for banner, submitted in (
+                ("gpt-6-astra • high", True),
+                ("gpt-6-astra • low", False),
+                ("gpt-6-astra • medium", False),
+                ("gpt-6-astra • thinking off", False),
+                ("gpt-6-astra", False),
+                ("other-model • high", False),
+                ("gpt-6-astra • low\nExtension status: high", False)):
+            with self.subTest(banner=banner):
+                steps = self.happy_steps(native=args.agent_args)
+                steps[-1] = self.read(banner)
+                if submitted:
+                    steps.append(self.prompt_steps()[-1])
+                result, calls = self.run_launcher(
+                    steps, ["--prompt", "Review the diff", *expect,
+                            "--", *args.agent_args], allow_prompt=submitted)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                data = json.loads(result.stdout)
+                self.assertEqual(data["submitted"], submitted)
+                self.assertEqual(data["submission_blocked"],
+                                 None if submitted else "startup_unexpected")
+                prompts = [call for call in calls
+                           if call[2:4] == ["agent", "prompt"]]
+                self.assertEqual(len(prompts), 1 if submitted else 0)
+                self.assertEqual(calls, [item["args"] for item in steps])
+                if not submitted:
+                    self.assertEqual(data["startup"], banner)
+                    self.assertTrue(data["inspection_required"])
 
     def test_expected_startup_text_is_validated_before_herdr(self):
         for extra in (["--expect-startup", "fable"],

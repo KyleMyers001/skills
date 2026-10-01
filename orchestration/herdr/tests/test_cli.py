@@ -135,16 +135,23 @@ class ReviewRunbookTests(unittest.TestCase):
 
     def test_astra_runbook_requires_high_thinking_before_submission(self):
         args = self.launch_args("astra-review")
-        self.assertEqual(args.agent_args[:4],
-                         ["--model", "openai-codex/gpt-6-astra", "--thinking", "high"])
-        self.assertIn("gpt-6-astra", args.expect_startup)
-        self.assertIn("thinking: high", args.expect_startup)
-        for text, blocked in (("gpt-6-astra • thinking: high", None),
-                              ("gpt-6-astra • thinking: low", "startup_unexpected"),
-                              ("gpt-6-astra", "startup_unexpected")):
+        self.assertEqual(args.agent_args,
+                         ["--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+                          "--exclude-tools", "edit,write"])
+        # Pi 0.99.2 footer: model • level (off renders as "thinking off").
+        for text, blocked in (
+                ("gpt-6-astra • high", None),
+                ("gpt-6-astra • low", "startup_unexpected"),
+                ("gpt-6-astra • medium", "startup_unexpected"),
+                ("gpt-6-astra • thinking off", "startup_unexpected"),
+                ("gpt-6-astra", "startup_unexpected"),
+                ("other-model • high", "startup_unexpected"),
+                ("gpt-6-astra • low\nExtension status: high", "startup_unexpected")):
             with self.subTest(text=text):
                 self.assertEqual(checks.submission_block(
                     text, False, args.expect_startup), blocked)
+        self.assertEqual(args.expect_startup,
+                         ["gpt-6-astra", "gpt-6-astra • high"])
 
     def test_initial_review_waits_fit_full_default_launch_budget(self):
         # Include server/list/create/read and an optional agent-get, a busy
