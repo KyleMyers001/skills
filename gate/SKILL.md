@@ -69,6 +69,25 @@ Handoffs: concise prose with absolute paths, work ID, HEAD/digest, scope
 limits, and required return fields. Never guess a malformed reply — re-ask
 once, then escalate to Kyle.
 
+## Default models
+
+Load Herdr launch defaults from
+[references/default-models.json](references/default-models.json) (same
+directory tree as this skill). Edit that file to change models — do not
+hard-code IDs in this SKILL.md.
+
+| Role | JSON key | Used for |
+| --- | --- | --- |
+| Reviewer | `reviewer` | Phase 1 code-review / delta-review |
+| QA | `qa` | Phase 2 E2E planner, phase 3 executor, phase 4 evidence auditor |
+| Developer | `developer` | Remediation / fix loops |
+
+When launching via [herdr](../orchestration/herdr/SKILL.md), pass each role's
+`kind`, `--model`, and `thinking` (when present) after `--`. Repeat
+`--expect-startup` so the banner matches the chosen model (and thinking
+level when set) before submit. Kyle may override per run; if a requested
+model is unavailable, stop and ask — never silently substitute.
+
 ## Budgets and routing
 
 - **Phase 1 review→fix loop:** max **3** remediation cycles (EL-65). Initial
