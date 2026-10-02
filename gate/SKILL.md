@@ -56,33 +56,17 @@ match, stop before phase 3. Unexpected product-tree drift → invalidate and sto
 
 ## Run workspace
 
-Use one Herdr workspace in `Subagents` for all workers in this run. This groups
-agent tabs, not Git worktrees or conversations; keep the absolute checkout and
-each worker's role/model/tool restrictions unchanged.
-
-- **Standalone:** the first reviewer launches without `--workspace`. Record its
-  returned `workspace_id` with `run-id` in `<run-id>-gate-run.md` before launching
-  another worker. Keep the launcher's label and use its returned root pane.
-- **Inside orchestrate-ticket:** before Phase 1, inspect the waiting developer's
-  live Herdr metadata and verify its workspace/checkout. Record that workspace
-  ID for gate; launch the first reviewer there too. Reuse the developer without
-  moving it or launching a replacement. Earlier ticket tabs may remain there.
-- Once selected, every new worker launch **must** pass `--workspace <recorded-id>`
-  before `--` to Herdr's launcher. This includes Astra/Fable, planner, executor,
-  auditor, developer, delta/dispute reviews, and all repair/re-audit cycles.
-  Read Herdr's workspace guidance; let the launcher validate live checkout
-  evidence and create each fresh agent's unfocused tab. Record returned worker
-  names and workspace/tab/pane IDs; they must agree with the run's workspace.
-- **Resume/failure:** reconcile the saved ID, live resources, and pending
-  submissions before continuing. Preserve known IDs on partial launch failure
-  and follow Herdr recovery. Missing, stale, or conflicting workspace state
-  blocks further launches until reconciled; never drop `--workspace` as a
-  fallback, guess by label/focus, or blindly relaunch. Wait on existing work.
-  Preserve run budgets; never automatically move, rename, or close resources.
-
-A new standalone run creates its own workspace; resuming a run does not. Ticket
-runs can reuse the waiting developer's workspace while keeping separate run logs
-and evidence directories.
+Use one Herdr workspace per run, with separate worker conversations/tabs.
+**Standalone:** launch the first reviewer without `--workspace` and capture its
+returned ID. **Inside orchestrate-ticket:** adopt the waiting developer's live,
+verified workspace/checkout before Phase 1, including for the first reviewer.
+Persist `workspace_id` with `run-id` in `<run-id>-gate-run.md` before further
+launches. Pass `--workspace <recorded-id>` before `--` on every subsequent launch,
+including Astra/Fable and all review, repair, QA, and audit cycles; retain worker
+names and returned workspace/tab/pane IDs. Follow Herdr's workspace/recovery
+rules. On resume, reconcile the saved ID and pending work; missing, stale, or
+conflicting workspace evidence blocks launches, never permits a replacement.
+A new standalone run creates a workspace; resuming one does not.
 
 ## Roles
 
