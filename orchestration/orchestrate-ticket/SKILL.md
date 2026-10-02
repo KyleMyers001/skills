@@ -67,16 +67,20 @@ approval or restart.
    runbook's safety preflight before starting verification. Preserve complete
    user intent. Drive the gate pipeline rather than editing code; escalate
    human-only decisions.
-7. **Report:** stop at PR ready for Kyle's review, never merge. Report PR/full
-   HEAD, checks, pipeline fixes, exceptions, evidence, and blockers. Final-head
-   acceptance evidence is required; skipped/unrunnable checks are not green.
+7. **Report:** stop when gate has published/updated the PR and the gate report
+   is ready for Kyle's review; never merge. Report PR URL, full final HEAD,
+   charter checks (including standard unit/lint when in scope), gate
+   remediations, exceptions, evidence, and blockers. Final-head acceptance
+   evidence is required; skipped/unrunnable checks are not green.
 
 ## Stop and Resume
 
 Persist approval, ownership, identities, evidence, and counters as specified in
-the runbook. Reconcile live agents and AXI before resuming; never duplicate work
-or reset budgets. Cap fresh pipeline submissions at two per approved execution;
-reattachment is not a new submission. Escalate external blockers immediately.
+the runbook. Reconcile live Herdr agents and the persisted gate run state
+(`run-id`, HEAD/digest, ownership, budgets, pending submissions) before
+resuming; never duplicate work or reset budgets. Cap fresh gate invocations at
+two per approved execution; reattachment is not a new invocation. Escalate
+external blockers immediately.
 
 Unapproved destructive operations, uncertain custody/approval, material scope
 changes, exhausted limits, and missing required evidence mean stop and ask.

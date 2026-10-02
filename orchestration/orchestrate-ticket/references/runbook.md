@@ -128,61 +128,51 @@ and persisted output when needed; reconcile before retrying. Do not blindly
 resend prompts. Compare the commit/diff with the intended task and report any
 unexpected changes without attributing or reverting them.
 
-## Pipeline Safety and Ownership
+## Gate verify/deliver and ownership
 
-Before starting, resuming, or authorizing pipeline actions, load the installed
-gate skill. Treat it as an external dependency, not a fixed implementation.
+Before starting, resuming, or authorizing verify/deliver, load
+[gate](../../../gate/SKILL.md). Follow its phases; do not invent a CLI wrapper.
 
-**Mandatory safety preflight:** inspect the target configuration and installed
-behavior for rebases, reset-like synchronization/recovery, force pushes, and the
-post-checks conflict monitor. Global rules require exact advance disclosure and
-Kyle's explicit permission before destructive/history-rewriting operations,
-including delegated ones. Generic execution approval or an automatic-fix label
-is insufficient. Never push to `main`/`master` or the repository default branch.
+**Safety preflight:** confirm feature branch (not default), intended PR base,
+committed handoff HEAD, readable `default-models.json`, and Herdr Subagents.
+Global rules still require exact advance disclosure and Kyle's explicit
+permission before destructive/history-rewriting operations. Never push to
+`main`/`master`/default; never force-push. Gate Phase 6 owns the only allowed
+feature-branch push and PR create/update.
 
-Do not launch if the pipeline can perform unapproved destructive actions without
-pausing, including after reporting checks passed. Request a demonstrably safe
-configuration or specific authorization for known operations. If that cannot be
-established, report the incompatibility and keep delivery blocked. Do not skip
-validation steps to circumvent it or auto-approve recovery/reset commands.
+After preflight and developer handoff:
 
-After safety preflight and developer handoff:
-
-1. Verify submitted full HEAD, committed scope, feature push target, intended
-   PR base, and absence of a conflicting write owner or in-progress gate run on
+1. Verify submitted full HEAD, committed scope, feature branch, intended PR
+   base, and absence of a conflicting write owner or in-progress gate run on
    the same branch. Record the handoff HEAD and one verification attempt before
    starting; interrupted attempts remain counted until reconciled. Maximum two
    fresh gate invocations per approved execution.
-2. Load [gate](../../../gate/SKILL.md) and run it as the verify/deliver stage
-   for this handoff. Preserve requirements, exclusions, acceptance criteria,
-   later decisions, tradeoffs, and plan reference in the gate scope. Do not
-   invent a CLI wrapper; follow the skill phases (review → E2E plan → execute →
-   audit → report).
-3. Record `run-id`, submitted HEAD, post-gate HEAD, and write ownership. Once
-   gate is active, developer remediations go through gate's developer budget;
-   the orchestrator does not apply local product fixes outside that path.
+2. Run gate as verify/deliver. Preserve requirements, exclusions, acceptance
+   criteria, later decisions, tradeoffs, and plan reference in the gate scope.
+   Phases: review → E2E plan → execute → audit → report → **publish**.
+3. Record `run-id`, submitted HEAD, post-gate HEAD, PR URL, and write ownership.
+   Once gate is active, developer remediations go through gate's developer
+   budget; the orchestrator does not apply local product fixes outside that path.
 4. At each gate stop/escalate, read the full findings. Resolve only in-scope,
    low-risk decisions within existing authorization. Relay ask-user items
-   (IDs/files/full descriptions) verbatim to Kyle; protected-path and
-   scope/behavior changes also need Kyle. Never skip audit or weaken severities.
+   verbatim to Kyle; protected-path and scope/behavior changes also need Kyle.
+   Never skip audit or weaken severities.
 5. Elapsed waits are inconclusive. Inspect Herdr `get`/`read` and gate run
-   artifacts; do not start a duplicate gate run to evade a stop. Do not fix
-   product code outside gate ownership.
+   artifacts; do not start a duplicate gate run to evade a stop.
 6. After a blocked or cancelled gate outcome, reconcile HEAD/digest and remaining
    developer/evidence budgets before any follow-up. Never improvise reset, force,
-   or branch replacement. Developer follow-up through gate preserves prior fixes
-   and remaining budgets. A new gate invocation consumes the remaining attempt
+   or branch replacement. A new gate invocation consumes the remaining attempt
    budget.
-7. Stop when gate reports ready-for-Kyle (or blocked). Do not merge. Inspect the
-   gate report, evidence links, final HEAD, and any PR/CI evidence gate recorded.
-   Missing or UNVERIFIED required evidence blocks readiness.
+7. Stop when gate has published/updated the PR and the gate report is ready (or
+   blocked). Do not merge. Inspect the gate report, evidence links, PR URL,
+   final HEAD, and any required-check status gate recorded. Missing or
+   UNVERIFIED required evidence blocks readiness.
 
 Map required acceptance evidence to the final HEAD. Gate remediations invalidate
 prior execution evidence until a full charter re-run on the new baseline.
-Confirm affected checks, including required browser/E2E checks, ran against
-final content. Missing evidence blocks readiness; request the smallest safe
-follow-up without violating active gate ownership. Report each remediation and
-what the original implementation missed.
+Confirm affected checks, including required browser/E2E and charter-included
+unit/lint, ran against final content. Report each remediation and what the
+original implementation missed.
 
 For Kyle's review, write `<plan-id>-<short-title>.md` with the `report` skill
 (or link the gate report). Link the run and orchestration logs from it; they are
@@ -206,24 +196,24 @@ and planner session. The orchestration log records:
   restrictions, and execution assignment.
 - Absolute checkout, branch/base, baseline HEAD, agent names/pane/session IDs,
   actual models/reasoning, current write owner, and pending prompts.
-- Developer log/evidence paths, handoff HEAD, run ID, pipeline/final HEAD, PR,
+- Developer log/evidence paths, handoff HEAD, gate `run-id`, final HEAD, PR URL,
   acceptance results, required-check exceptions, and sensitive-output redactions.
-- Developer repair counts from its log; pipeline submissions used/remaining;
-  native pipeline fix limits and progress. Never reset counters across sessions,
-  failures, agents, or pipeline restarts. Do not reclassify repairs as increments.
+- Developer repair counts from its log; gate invocations used/remaining; gate
+  developer/evidence budgets and progress. Never reset counters across sessions,
+  failures, agents, or gate restarts. Do not reclassify repairs as increments.
 
 On resume, read both logs and reconcile the plan, approval, agents, branch HEAD,
 gate outcome/custody, and interrupted attempts before acting. Missing state or
 ambiguous permission/ownership means stop and ask about the specific gap; intact
 approval and ownership evidence needs no repeated human gate. A stale handoff
-cannot start another pipeline. Investigate a digest mismatch rather than simply
+cannot start another gate run. Investigate a digest mismatch rather than simply
 replacing the digest; material plan changes cannot inherit earlier approval.
 
 Escalate external access/environment blockers immediately and exhausted budgets
 with remaining work. Bound waits and report liveness uncertainty rather than
 restarting processes. Never close panes, kill processes, or delete worktrees as
-automatic cleanup. Agents/pipelines may remain alive after the orchestrator stops;
-gates require a resumed driver, not an implied always-running service.
+automatic cleanup. Agents may remain alive after the orchestrator stops; a gate
+stop needs a resumed driver, not an implied always-running service.
 
 ## Development Evaluation Cases
 
@@ -248,8 +238,9 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Missing worker models/prerequisites block, not substitute.
 - Developer writes all planned tests first and hands off a verified commit
   without publication. Standalone closed-loop still pushes a feature-branch PR.
-- Ask-user/unsafe-operation gates reach Kyle; only the pipeline writes while it
-  owns custody. Unapproved automatic destructive behavior blocks launch.
+- Ask-user/unsafe-operation gates reach Kyle; only gate's developer path writes
+  product code while gate owns custody. Unapproved destructive behavior blocks
+  launch.
 - Timeout, interrupted submission, stale HEAD, and missing logs do not duplicate
   work, invent approval, or reset counters. Exhausted budgets stop further work.
 - Skips, empty CI, and stale final-head evidence never become an unqualified pass.
