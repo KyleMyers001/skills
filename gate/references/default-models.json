@@ -1,0 +1,35 @@
+{
+  "reviewer": {
+    "kind": "pi",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high",
+    "exclude_tools": "edit,write",
+    "expect_startup": ["gpt-6.1-sol", "gpt-6.1-sol • high"]
+  },
+  "e2e_planner": {
+    "kind": "pi",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high",
+    "exclude_tools": "edit,write",
+    "expect_startup": ["gpt-6.1-sol", "gpt-6.1-sol • high"]
+  },
+  "qa": {
+    "kind": "pi",
+    "model": "openai-codex/gpt-5.6-terra",
+    "exclude_tools": "edit,write",
+    "expect_startup": ["gpt-5.6-terra"]
+  },
+  "auditor": {
+    "kind": "pi",
+    "model": "openai-codex/gpt-5.6-terra",
+    "thinking": "high",
+    "exclude_tools": "edit,write",
+    "expect_startup": ["gpt-5.6-terra", "gpt-5.6-terra • high"]
+  },
+  "developer": {
+    "kind": "pi",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high",
+    "expect_startup": ["gpt-6.1-sol", "gpt-6.1-sol • high"]
+  }
+}
