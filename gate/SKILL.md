@@ -157,8 +157,9 @@ Budgets; re-audit after corrections.
 [report](../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md` (also on
 blocked stops). Cover reviewed vs E2E-verified vs delivered; verification table;
 evidence links (**UNVERIFIED** if missing); remaining work; formatting
-uncertainties. Leave PR URL/final SHA blanks until Phase 6 (or mark
-unpublished). [lavish](../lavish/SKILL.md) only if Kyle asks.
+uncertainties. Draft PR URL / final SHA / check-status fields here; **Phase 6
+must finalize them** (no placeholders left when the report is declared ready).
+[lavish](../lavish/SKILL.md) only if Kyle asks.
 
 ## Phase 6 — Publish
 
@@ -184,7 +185,13 @@ Only after auditor cause `clean` at the already-committed verified HEAD.
   `published, checks failed` (block ready wording); or `published, CI pending`
   if required checks are still running at timeout. Missing required checks
   after wait ≠ green.
-- Push/PR auth or protected-branch failure → stop and ask; keep the report.
+- Push/PR auth or protected-branch failure → stop and ask.
+- **Finalize the report before declaring ready:** for every Phase 6 outcome
+  (published with checks passed/failed/pending, local-only unpublished, or
+  publish failure), update `<run-id>-gate.md` with the PR URL or unpublished
+  note, full final SHA, push remote, intended base, and required-check status.
+  Revalidate that no placeholders remain ([report](../report/SKILL.md)). Only
+  then treat the gate report as ready for Kyle / orchestrate-ticket.
 
 ## Stop
 
