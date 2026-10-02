@@ -54,19 +54,40 @@ match, stop before phase 3. Unexpected product-tree drift → invalidate and sto
   `<run-id>-gate-evidence/` before phase 1; do not overwrite existing runs.
   Write a report on blocked stops too (state = blocked + reason).
 
+## Run workspace
+
+Use one Herdr workspace per run, with separate worker conversations/tabs.
+**Standalone:** launch the first reviewer without `--workspace` and capture its
+returned ID. **Inside orchestrate-ticket:** adopt the waiting developer's live,
+verified workspace/checkout before Phase 1, including for the first reviewer.
+Persist `workspace_id` with `run-id` in `<run-id>-gate-run.md` before further
+launches. Pass `--workspace <recorded-id>` before `--` on every subsequent launch,
+including Astra/Fable and all review, repair, QA, and audit cycles; retain worker
+names and returned workspace/tab/pane IDs. Follow Herdr's workspace/recovery
+rules. On resume, reconcile the saved ID and pending work; missing, stale, or
+conflicting workspace evidence blocks launches, never permits a replacement.
+A new standalone run creates a workspace; resuming one does not.
+
 ## Roles
 
 | Role | Profile | Notes |
 | --- | --- | --- |
 | Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
-| Developer | `developer` | Scoped remediation + commits on the feature branch; no E2E authorship, push, or PR. **Standalone gate:** launch from `default-models.json`. **Inside orchestrate-ticket:** reuse the waiting ticket developer (keep its model); do not launch a second developer. |
+| Developer | `developer` | Scoped remediation; see constraints below. |
 | E2E planner | `e2e_planner` | Charter + evidence requirements. |
 | E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); `exclude_tools` blocks product-tree edit/write. Orchestrator may assemble the formal record from the reply into that dir. |
-| Auditor | `auditor` | Separate launch. After every execution **record**. Confirms disposable-path list is untracked non-source only. |
+| Auditor | `auditor` | Separate launch after every execution **record**. |
 | Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
 | Publish | — | Phase 6 when a remote exists. |
 
-Handoffs: absolute paths, `run-id`, baseline HEAD/identity, scope, return fields.
+Developer commits fixes on the feature branch; no E2E authorship, push, or PR.
+**Standalone gate:** launch from `default-models.json`. **Inside
+orchestrate-ticket:** reuse the waiting ticket developer (keep its model); do
+not launch a second developer. Auditor confirms the disposable-path list is
+untracked non-source only.
+
+Handoffs: absolute paths, `run-id`, selected `workspace_id` (once established),
+baseline HEAD/identity, scope, return fields.
 Consume accessible answers even if labels are messy — record missing fields as
 uncertainty in the run log/report. Escalate only when **severity labels** (must-fix
 set) or **auditor cause** are substantively unresolved so routing cannot proceed;
@@ -203,5 +224,6 @@ safety-sensitive needs; unexpected identity drift; audit undecidable (missing
 cause); publish failure. Preserve useful work; still write the blocked report.
 
 [closed-loop](../closed-loop/SKILL.md) is upstream implementation — not part of
-gate unless Kyle asks separately. [orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md)
-may invoke gate for verify/deliver; gate owns publish when an explicit push remote is recorded.
+gate unless Kyle asks separately.
+[orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md) may invoke gate
+for verify/deliver; gate owns publish when an explicit push remote is recorded.

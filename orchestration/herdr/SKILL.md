@@ -30,6 +30,13 @@ with the agent name, uses that root pane, and can submit the task. It does not
 add a tab to an existing workspace unless `--workspace` is passed. It never
 closes resources.
 
+A workflow such as gate may select one workspace for its workers. Pass its
+recorded ID as `--workspace <id>` before `--` on each subsequent launcher call;
+read the workspace guidance below. The helper verifies live checkout evidence
+and adds an unfocused tab for a fresh conversation. Do not discover a substitute
+or omit the flag when that workspace is unavailable. Ordinary launches retain
+the new-workspace default.
+
 ```bash
 python3 "$herdr_dir/scripts/launch-agent.py" \
   --cwd /absolute/repo/path --name-prefix task-name --kind pi \
