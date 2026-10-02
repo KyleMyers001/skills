@@ -29,8 +29,10 @@ audit, and only when a remote exists.
 
 Need absolute repo/worktree and a **clean, committed** feature-branch HEAD for
 the completed change. Dirty staged/unstaged trees → stop before Phase 1 (do not
-commit the original input as coordinator). Intended PR base is required only
-when a push remote exists.
+commit the original input as coordinator). When publishing, record an **explicit
+push remote** (e.g. `origin`) and intended PR base before Phase 6 — do not infer
+the destination when multiple remotes exist. If there is no usable push remote,
+treat as local-only.
 
 **Product identity** = HEAD plus the astra-review / code-critique **content
 digest** (tracked diffs and nonignored untracked files). Record the branch line
@@ -162,16 +164,26 @@ unpublished). [lavish](../lavish/SKILL.md) only if Kyle asks.
 
 Only after auditor cause `clean` at the already-committed verified HEAD.
 
-- **No push remote:** skip publish; report
+- **No usable push remote:** skip publish; report
   `verified, unpublished (local-only)`.
-- **Remote present:** confirm branch is not default; intended PR base is set;
-  non-force push the feature branch; if an open PR exists for the branch,
-  that updates it, else create one against the base (`gh pr create` or
-  equivalent). Never merge, never push default, never force-push.
-- After push/PR: bounded wait for required checks (e.g. `gh pr checks --watch`
-  with a finite timeout). Then record one of: `published, checks passed`;
+- **Publish path:** record the explicit push remote and intended PR base in the
+  run log. Confirm the branch is not the default. Non-force push to
+  `<push-remote>/<feature-branch>` only (`git push <remote> HEAD`). Never merge,
+  never push the default branch, never force-push.
+- **Existing open PR for this branch:** read its base. If it matches the
+  intended base, the push updates the head. If it differs, correct it with
+  `gh pr edit --base <intended>` (or equivalent) before treating the run as
+  published; if correction is unauthorized or fails → stop and ask. Do not
+  report publication against the wrong base.
+- **No open PR:** create one against the intended base
+  (`gh pr create --base ...` or equivalent), targeting the repo that owns that
+  base (usually after pushing to the recorded remote).
+- **Required checks only:** bounded wait with
+  `gh pr checks --watch --required` (finite timeout). Ignore optional checks
+  when assigning status. Record one of: `published, checks passed`;
   `published, checks failed` (block ready wording); or `published, CI pending`
-  if still running at timeout. Missing required checks after wait ≠ green.
+  if required checks are still running at timeout. Missing required checks
+  after wait ≠ green.
 - Push/PR auth or protected-branch failure → stop and ask; keep the report.
 
 ## Stop
@@ -185,4 +197,4 @@ cause); publish failure. Preserve useful work; still write the blocked report.
 
 [closed-loop](../closed-loop/SKILL.md) is upstream implementation — not part of
 gate unless Kyle asks separately. [orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md)
-may invoke gate for verify/deliver; gate owns publish when a remote exists.
+may invoke gate for verify/deliver; gate owns publish when an explicit push remote is recorded.
