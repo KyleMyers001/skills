@@ -74,7 +74,7 @@ A new standalone run creates a workspace; resuming one does not.
 | --- | --- | --- |
 | Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
 | Developer | `developer` | Scoped remediation; see constraints below. |
-| E2E planner | `e2e_planner` | Charter + evidence requirements. |
+| E2E planner | `e2e_planner` | [planning](../planning/SKILL.md), E2E mode. Saves the charter under `~/Workbench/Plans/`; shell writes there only, product checkout read-only. |
 | E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); `exclude_tools` blocks product-tree edit/write. Orchestrator may assemble the formal record from the reply into that dir. |
 | Auditor | `auditor` | Separate launch after every execution **record**. |
 | Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
@@ -91,7 +91,8 @@ baseline HEAD/identity, scope, return fields.
 Consume accessible answers even if labels are messy — record missing fields as
 uncertainty in the run log/report. Escalate only when **severity labels** (must-fix
 set) or **auditor cause** are substantively unresolved so routing cannot proceed;
-do not invent classifications or re-prompt for formatting alone.
+do not invent classifications or re-prompt for formatting alone. Phase 2's saved
+plan is a required artifact, not a formatting preference.
 
 ## Launch profiles
 
@@ -147,18 +148,29 @@ delta-review. Clean → phase 2.
 
 ## Phase 2 — E2E plan
 
-Planner (`e2e_planner`); do not run tests. Charter covers acceptance-critical
-journeys and failure paths at a real boundary; prefer existing E2E tooling;
-smallest viable path. **Also include** the repo's documented standard
-unit/lint/typecheck commands (package scripts, Makefile, or CI config) unless
-Kyle scoped them out. Include verification contract (surface, commands,
-assertions, steps, evidence requirements and what each artifact **proves**).
-Screenshots = visible state only. Name teardown that restores product identity.
-List disposable paths (untracked non-source only). Blocking gap → ask Kyle.
+Launch `e2e_planner` with explicit instructions to read
+[planning](../planning/SKILL.md) and its
+[E2E test-plan reference](../planning/references/e2e-test-plan.md) (resolve both
+to absolute paths in the prompt). Do not run product tests or edit product files.
+
+Assign `~/Workbench/Plans/<run-id>-e2e-test-plan.md` as the required deliverable.
+Pass its absolute path, the run log, evidence directory, acceptance/scope, and
+current baseline identity. Explicitly allow shell writes to that plan despite
+`edit`/`write` exclusions. Require the reference's compact format and a short
+reply with the absolute path, revision, coverage, and blockers — no inline plan.
+
+Open the saved file before Phase 3; check the reference's coverage, standard
+commands, evidence contract, and teardown requirements. Record its absolute path
+and revision in the run log; pass the same artifact to executor and auditor.
+Chat-only output or an unreadable/missing plan → have the planner save it before
+continuing; do not treat the chat as the charter. Blocking gap → ask Kyle.
+After code remediation, have the planner reconcile the saved plan with the new
+baseline and update its revision before the full re-run; do not narrow coverage.
 
 ## Phase 3 — Execute
 
-Executor (`qa`) on current baseline. Full charter in order → evidence dir.
+Executor (`qa`) reads the full saved plan on the current baseline. Execute the
+charter in order → evidence dir; retain its check/case IDs in the record.
 Each item: expected, observed, pass/fail/unverified/blocked, path, **pre-run
 product identity**. After teardown, recompute: must equal pre-run; mismatch →
 invalidate and stop. Suspected target env/auth/tooling → blocked record →
@@ -166,9 +178,10 @@ phase 4. Mid-run Herdr launch failure → stop (see Launch).
 
 ## Phase 4 — Audit
 
-New `auditor` launch with record, paths, charter, acceptance, matching pre/post
-identity, and the disposable-path list — including all-green and blocked
-records. Auditor opens artifacts, spot-checks cheap read-only charter checks
+New `auditor` launch with record, paths, saved plan path/revision, acceptance,
+matching pre/post identity, and the disposable-path list — including all-green
+and blocked records. Auditor reads the plan and opens artifacts, spot-checks
+cheap read-only charter checks
 when feasible, rejects bad disposable lists or identity mismatch, and states
 cause (`code` / `QA-evidence` / `runtime-capability` / `clean`). Route per
 Budgets; re-audit after corrections.

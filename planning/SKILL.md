@@ -1,9 +1,9 @@
 ---
 name: planning
 description: >-
-  Create grounded general or closed-loop implementation plans under
-  ~/Workbench/Plans. Use when Kyle asks to plan, scope, design, or outline work
-  before coding.
+  Create grounded implementation or E2E test plans under ~/Workbench/Plans.
+  Use when Kyle asks to plan, scope, design, or outline work before coding,
+  requests an E2E test plan, or Gate assigns a QA Planner.
 metadata:
   argument-hint: <task, ticket, or implementation goal>
 ---
@@ -11,8 +11,18 @@ metadata:
 # Planning
 
 Apply this skill when planning is requested or the selected workflow requires it;
-it does not require a plan for ordinary development edits. Initially create only
-the plan; after approval, follow [Approval & Execution](#approval--execution).
+it does not require a plan for ordinary development edits.
+
+## Choose the Plan Type
+
+- **E2E test plan / Gate QA Planner:** read and follow
+  [references/e2e-test-plan.md](references/e2e-test-plan.md) instead of the
+  implementation workflow below. It defines the Markdown artifact, compact
+  format, and handoff. Plan only; do not run tests or implement changes.
+  Gate owns execution authorization and routing for its delegated planner.
+- **Implementation plan (including closed-loop):** follow the workflow below.
+  Initially create only the plan; after approval, follow
+  [Approval & Execution](#approval--execution).
 
 ## Workflow
 
@@ -70,8 +80,9 @@ the plan; after approval, follow [Approval & Execution](#approval--execution).
 - State requirements once; reference them from compact test inventories with
   expected results. Avoid paragraphs per assertion, speculative test names or
   fixture contents, and copies of workflow rules. Preserve required coverage.
-- Do not duplicate full templates for different workflows or create separate
-  test-plan files by default. Add detail only for non-obvious work or risk.
+- Do not duplicate full templates for implementation workflows or split their
+  tests into separate files by default. The explicitly selected E2E test-plan
+  mode above produces its own artifact.
 - Prefer bullets to prose or tables when either works. Wrap at 80 columns where
   practical; long URLs, commands, and compact tables may exceed that width.
 - Cite key ticket acceptance criteria instead of copying the whole ticket.
