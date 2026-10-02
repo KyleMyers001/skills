@@ -18,7 +18,6 @@ requirements before using it elsewhere.
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
 | [lavish](lavish/SKILL.md) | Create reviewable HTML artifacts for visual or complex responses. |
-| [no-mistakes](no-mistakes/SKILL.md) | Gate changes with review, tests, lint, docs, PR, and CI checks. |
 | [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
 | [fable-review](orchestration/fable-review/SKILL.md) | Request a Fable review through Claude Code and Herdr. |
 | [herdr](orchestration/herdr/SKILL.md) | Coordinate coding agents in a Herdr session. |
@@ -65,7 +64,7 @@ it. See the [Herdr skill](orchestration/herdr/SKILL.md) for the normal workflow.
 See its [manual reference](orchestration/herdr/references/manual-launch.md) for
 persona launches, helper limits, and recovery.
 
-Tools such as `agent-browser`, `acli`, Herdr, and `no-mistakes axi` must be installed
-and configured separately where required. The descriptions in each `SKILL.md`
+Tools such as `agent-browser`, `acli`, and Herdr must be installed and
+configured separately where required. The descriptions in each `SKILL.md`
 specify when a skill should activate; in particular, opt-in workflows should not
 be triggered merely because their topic comes up.

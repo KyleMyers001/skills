@@ -4,41 +4,38 @@ description: >-
   Run the standalone post-implementation verification pipeline (Herdr code
   review → E2E plan → QA evidence → always evidence-audit → Kyle report). Use
   **only** when Kyle says "gate" / "run the gate," or manually invokes this
-  skill. Do **not** use for ordinary implement/fix, closed-loop, or
-  orchestrate-ticket runs.
+  skill. Replaces the former no-mistakes ship/gate skill. Do **not** use for
+  ordinary implement/fix, closed-loop, or orchestrate-ticket plan/implement
+  stages (orchestrate-ticket may call gate for verify/deliver).
 metadata:
   argument-hint: <repo, branch/PR, or completed change to verify>
 ---
 
 # Gate
 
-**Opt-in only** ("gate" / "run the gate" / manual invoke). Not part of
-[orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md) — do not
-edit it. [no-mistakes](../no-mistakes/SKILL.md) stays until a later change
-(EL-65); prefer **gate** for this pipeline.
+Opt-in post-implementation verification ("gate" / "run the gate" / manual
+invoke). Replaces **no-mistakes**. Coordinate only — never edit target
+source, tests, or shipping config yourself.
 
-## Orchestrator
+Fixes go to [developer](../developer/SKILL.md) via Herdr. Plan/execute E2E
+with planner/executor. Review and evidence-audit use separate workers.
+Sequence via [herdr](../orchestration/herdr/SKILL.md) (`--session Subagents`).
+Relay findings verbatim. Route by the **auditor's** cause. Durable state only
+under `~/Workbench/Reports/`. No merge, deploy, push, or invented approvals.
 
-Coordinate only — never edit target source/tests/shipping config.
-
-- Fixes → [developer](../developer/SKILL.md) via Herdr. Plan/execute E2E →
-  planner/executor. Review/audit → separate workers.
-- Sequence via [herdr](../orchestration/herdr/SKILL.md) (`--session
-  Subagents`), relay findings **verbatim**, enforce budgets, route by the
-  **auditor's** cause, report to Kyle.
-- Durable state only under `~/Workbench/Reports/`. Subagents never talk to
-  Kyle. No merge/deploy/push or invented approvals.
-
-## Scope and run identity
+## Scope and baseline
 
 Need absolute repo/worktree, branch/PR, base/range, and acceptance context for
-the **completed** change. Herdr + models available or stop (no silent
-substitutes).
+the **completed** change.
 
-Before phase 1 and after every developer return, record
-`git status --short --branch` plus a content digest (astra-review /
-code-critique pattern) as the **current gate baseline**. Out-of-band drift →
-stop.
+**Baseline digest** = `git status --short --branch` plus the astra-review /
+code-critique content digest. Record it before phase 1, after every developer
+return, after every read-only worker returns (reviewer, planner, auditor), and
+**again after E2E teardown**. Unexpected tracked or nonignored changes outside
+the evidence directory → invalidate that phase's evidence and stop (out-of-band
+drift). Expected E2E outputs must land under `<run-id>-gate-evidence/` or paths
+the charter lists as disposable; those do not count as drift. If the charter
+cannot avoid mutating the product tree, stop and ask Kyle before phase 3.
 
 - `work-id`: ticket key if known, else `gate-<YYYY-MM-DD>-<short-slug>`.
 - Each invocation: unique `run-id` = `<work-id>-<YYYYMMDD-HHMMSS>` (local).
@@ -46,104 +43,111 @@ stop.
 - Create `~/Workbench/Reports/<run-id>-gate-run.md` and
   `<run-id>-gate-evidence/` before phase 1; do not overwrite existing runs.
 
-## Roles and profiles
+## Roles
 
 | Role | Profile | Notes |
 | --- | --- | --- |
-| Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them (their launch profile). Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
+| Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
 | Developer | `developer` | Scoped remediation; no E2E authorship. |
 | E2E planner | `e2e_planner` | Charter + evidence requirements. |
 | E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. |
-| Auditor | `auditor` | Separate launch from planner/executor. After every execution record. |
+| Auditor | `auditor` | Separate launch. After every execution **record**. |
 | Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request. |
 
-Handoffs: absolute paths, `run-id`, baseline HEAD/digest, scope, return
-fields. Malformed reply → re-ask once, then escalate.
+Handoffs: absolute paths, `run-id`, baseline HEAD/digest, scope, return fields.
+Malformed or unlabeled required fields → **escalate to Kyle** (do not re-prompt;
+Herdr and astra/fable-review forbid regenerate-without-approval).
 
-### Launch (`default-models.json`)
+## Launch profiles
 
 Ordinary launches **must** use
-[references/default-models.json](references/default-models.json) (`provider/model`
-IDs). Missing file/key → stop; never invent fields. Edit the JSON, not this
-file, to change models.
+[references/default-models.json](references/default-models.json). Missing
+file/key → stop; never invent fields. Edit the JSON to change models.
 
-1. Confirm the exact `model` is listed (`pi --list-models` or Claude
-   equivalent).
-2. `--kind` from `kind`; after `--`, `--model <model>`.
-3. Reasoning: Pi → `--thinking` when `thinking` set; Claude → `--effort`
-   when set; other kinds → stop.
-4. `--expect-startup`: model **basename** (after last `/`); if Pi +
-   `thinking`, also `"<basename> • <thinking>"`. Never a bare reasoning word.
-5. Per-run overrides OK; unavailable model → stop.
+Each profile has `kind`, `model` (`provider/model`), optional `thinking`,
+optional `exclude_tools`, and required `expect_startup` (string list).
+
+1. Confirm the model exists: Pi → `pi --list-models`; Claude → `claude --help`
+   and `claude auth status` (no `pi --list-models` equivalent).
+2. `--kind` from `kind`. After `--`: `--model <model>`; if `thinking` set, Pi
+   gets `--thinking <thinking>`, Claude gets `--effort <thinking>`.
+3. Pass every `expect_startup` entry via repeated `--expect-startup`. For Pi,
+   include basename and contiguous `"basename • thinking"` when reasoning is
+   set. For Claude, list display phrases from the profile (e.g. model display
+   name and `with high effort`) — not a bare `high`. Never invent banner text
+   beyond the JSON list.
+4. If `exclude_tools` is set, pass `--exclude-tools <value>` (Pi) or the Claude
+   `--disallowed-tools` equivalent from the named review skill.
+5. `submitted: false` / auth / permission / `startup_unexpected` on **any**
+   mid-run launch → stop and ask Kyle (no audit path without a record).
 
 ## Budgets and routing
 
-- **Developer remediations (shared):** max **3** per run (phase 1 +
-  post-audit code fixes). Cycle = fix + delta-review. Initial review free.
-  Fourth fix → escalate. Do not weaken severity.
-- **Evidence-only:** no developer budget. **2 consecutive** with no progress
-  → escalate. Progress = artifacts that change auditor outcome, or full
-  charter re-run on a new baseline.
-- Route **only** by auditor cause:
+- **Developer remediations:** max **3** per run (phase 1 + post-audit code).
+  Cycle = fix + delta-review. Initial review free. Do not weaken severity.
+- **Evidence-only:** max **2 consecutive** with no progress (auditor cause and
+  required evidence unchanged). Progress = artifacts that change auditor
+  outcome, or a full charter re-run on a new baseline.
+- Route only by auditor cause:
   - **Code** → developer (counts) → delta-review → invalidate prior execution
     evidence → **full charter** on new baseline → re-audit.
-  - **QA/evidence** → executor re-collects → re-audit (not developer).
-  - **Runtime capability** → escalate **only** if auditor confirms.
-- Always run phase 4 after any execution record (pass/fail/blocked). Never
-  escalate env/auth/tooling from phase 3.
+  - **QA/evidence** → executor re-collects → re-audit.
+  - **Runtime capability** → escalate only if auditor confirms.
+- After any execution **record**, always phase 4. Target-env failures reported
+  by a running executor go to phase 4 first — never escalate those from phase 3.
 
 ## Phase 1 — Review
 
-1. Launch reviewer (`reviewer` or named Astra/Fable). Pass acceptance context;
-   never use prior plan-approval as code review.
-2. Require **Critical / High / Medium / Low** labels (instruct Astra/Fable to
-   add them).
-3. **Must-fix** = Critical/High only (Medium/Low reported, not auto-blocking).
-   Relay verbatim; developer returns `fixed`/`disputed`. One dispute in the
-   **same** cycle; standing disagreement → escalate.
-4. Re-baseline → fresh **delta-review** on the change set.
-5. No Critical/High → phase 2; budget exhausted with must-fix left → escalate.
+Launch reviewer. When using Astra/Fable, **append** to the launch prompt:
+label every finding Critical/High/Medium/Low (in addition to any merge
+verdict). Unlabeled report → escalate (no re-prompt).
+
+**Must-fix** = Critical/High only. Relay verbatim; developer returns
+`fixed`/`disputed`. One dispute (fresh launch) in the same cycle; standing
+disagreement → escalate. Re-baseline → delta-review. Clean → phase 2.
 
 ## Phase 2 — E2E plan
 
-Planner (`e2e_planner`); do not run tests. Charter: acceptance-critical
-journeys + failure paths at a real boundary; prefer existing E2E tooling;
+Planner (`e2e_planner`); do not run tests. Charter covers acceptance-critical
+journeys and failure paths at a real boundary; prefer existing E2E tooling;
 smallest viable path. Include verification contract (surface, commands,
-assertions, ordered steps, evidence requirements and what each artifact
-**proves**). Screenshots = visible state only; nonvisual needs
-request/status/response or command/exit/output. Name teardown if setup
-mutates state. Blocking gap or material ambiguity → ask Kyle (no audit yet).
+assertions, steps, evidence requirements and what each artifact **proves**).
+Screenshots = visible state only. Name teardown. List expected disposable
+output paths. Blocking gap or ambiguity → ask Kyle.
 
 ## Phase 3 — Execute
 
-Executor (`qa`) on **current** baseline (URL, HEAD/digest, ownership). Full
-charter in order → `<run-id>-gate-evidence/`. Each item: expected, observed,
-pass/fail/unverified/blocked, path, **baseline digest**. Sanitize secrets.
-Don't skip failures to green. Suspected env/auth/tooling → blocked record →
-phase 4 (no escalate here).
+Executor (`qa`) on current baseline. Full charter in order → evidence dir.
+Each item: expected, observed, pass/fail/unverified/blocked, path, **pre-run
+baseline digest**. After teardown, recompute digest: unexpected product-tree
+drift → invalidate record and stop; expected evidence-dir outputs OK. Suspected
+target env/auth/tooling → blocked record → phase 4. Mid-run Herdr launch
+failure → stop (see Launch).
 
-## Phase 4 — Audit (always)
+## Phase 4 — Audit
 
-New `auditor` launch with record, paths, charter, acceptance, baseline —
-including all-green and blocked. Auditor: open artifacts; spot-check cheap
-read-only charter checks when feasible; reject digest ≠ baseline (default);
-state cause (`code` / `QA-evidence` / `runtime-capability` / `clean`). Route
-per Budgets; re-audit after corrections. Executor alone never decides pass.
+New `auditor` launch with record, paths, charter, acceptance, and **post-exec
+digest** — including all-green and blocked records. Auditor opens artifacts,
+spot-checks cheap read-only charter checks when feasible, rejects evidence
+whose digest ≠ post-exec baseline (default), and states cause (`code` /
+`QA-evidence` / `runtime-capability` / `clean`). Route per Budgets; re-audit
+after corrections.
 
 ## Phase 5 — Report
 
-[report](../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md`; link
-run log/evidence. Cover reviewed vs E2E-verified vs delivered (no
-merge/deploy); verification table; evidence links (**UNVERIFIED** if missing);
-remaining work. [lavish](../lavish/SKILL.md) only if Kyle asks.
+[report](../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md`. Cover
+reviewed vs E2E-verified vs delivered; verification table; evidence links
+(**UNVERIFIED** if missing); remaining work. [lavish](../lavish/SKILL.md) only
+if Kyle asks.
 
 ## Stop
 
-Ask Kyle on: shared developer budget exhausted with Critical/High left; two
-no-progress evidence cycles; **auditor-confirmed** runtime blockers;
-pre-phase-1 tool/model/Herdr gaps; phase-2 blocking gaps/ambiguity;
-safety-sensitive needs; out-of-band baseline/scope drift; audit undecidable.
-Preserve useful work.
+Ask Kyle when: developer budget exhausted with must-fix findings **or** an
+outstanding auditor `code` cause; two no-progress evidence cycles;
+auditor-confirmed runtime blockers; tool/model/Herdr gaps (pre-phase-1 or
+mid-run launch failure); phase-2 blocking gaps; safety-sensitive needs;
+unexpected baseline drift; audit undecidable. Preserve useful work.
 
-Also: [closed-loop](../closed-loop/SKILL.md) is upstream implementation — not
-part of gate unless Kyle asks separately.
+[closed-loop](../closed-loop/SKILL.md) is upstream implementation — not part of
+gate unless Kyle asks separately. [orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md)
+may invoke gate for verify/deliver after implementation.
