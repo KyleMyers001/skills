@@ -149,10 +149,15 @@ After preflight and developer handoff:
    fresh gate invocations per approved execution.
 2. Run gate as verify/deliver. Preserve requirements, exclusions, acceptance
    criteria, later decisions, tradeoffs, and plan reference in the gate scope.
+   Pass the waiting developer's verified live workspace ID and checkout to gate
+   before Phase 1; follow gate's Run workspace rules so every new worker joins
+   it without moving or duplicating the developer. Missing or conflicting
+   workspace evidence blocks launch; it never authorizes a replacement workspace.
    Phases: review → E2E plan → execute → audit → report → **publish**.
-3. Record `run-id`, submitted HEAD, post-gate HEAD, PR URL (or local-only), and
-   write ownership. Once gate is active, remediations reuse the waiting ticket
-   developer under gate's remediation budget (do not launch a second developer);
+3. Record `run-id`, gate `workspace_id`, submitted HEAD, post-gate HEAD, PR URL
+   (or local-only), and write ownership. Once gate is active, remediations reuse
+   the waiting ticket developer under gate's remediation budget (do not launch
+   a second developer);
    the orchestrator does not apply local product fixes outside that path.
 4. At each gate stop/escalate, read the full findings. Resolve only in-scope,
    low-risk decisions within existing authorization. Relay ask-user items
@@ -196,18 +201,21 @@ and planner session. The orchestration log records:
   returns to approval; administrative log updates do not.
 - Plan path/revision/digest, approval wording/date/source/session, remaining
   restrictions, and execution assignment.
-- Absolute checkout, branch/base, baseline HEAD, agent names/pane/session IDs,
-  actual models/reasoning, current write owner, and pending prompts.
-- Developer log/evidence paths, handoff HEAD, gate `run-id`, final HEAD, PR URL,
-  acceptance results, required-check exceptions, and sensitive-output redactions.
+- Absolute checkout, branch/base, baseline HEAD, agent names and workspace/tab/
+  pane/session IDs, actual models/reasoning, current write owner, and pending
+  prompts.
+- Developer log/evidence paths, handoff HEAD, gate `run-id` and `workspace_id`,
+  final HEAD, PR URL, acceptance results, required-check exceptions, and
+  sensitive-output redactions.
 - Developer repair counts from its log; gate invocations used/remaining; gate
   developer/evidence budgets and progress. Never reset counters across sessions,
   failures, agents, or gate restarts. Do not reclassify repairs as increments.
 
 On resume, read both logs and reconcile the plan, approval, agents, branch HEAD,
-gate outcome/custody, and interrupted attempts before acting. Missing state or
-ambiguous permission/ownership means stop and ask about the specific gap; intact
-approval and ownership evidence needs no repeated human gate. A stale handoff
+gate workspace ID and live checkout evidence, outcome/custody, and interrupted
+attempts before acting. Missing state or ambiguous permission/ownership means
+stop and ask about the specific gap; intact approval and ownership evidence
+needs no repeated human gate. A stale handoff
 cannot start another gate run. Investigate a digest mismatch rather than simply
 replacing the digest; material plan changes cannot inherit earlier approval.
 

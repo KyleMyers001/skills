@@ -41,10 +41,18 @@ available for inspection/tests.
 
    Set `herdr_dir` to the absolute directory of the loaded Herdr skill, not this
    review skill. Use one launcher call with the `astra-review` prefix and the
-   verified model. Do not discover workspaces, create tabs, read the manual
-   launch reference, or call `herdr agent start` / `agent prompt` yourself.
-   Model and reasoning flags after `--` are the normal path. Never reuse an
-   existing conversation.
+   verified model. Do not discover workspaces, create tabs, or call
+   `herdr agent start` / `agent prompt` yourself. Model and reasoning flags after
+   `--` are the normal path. Never reuse an existing conversation.
+
+   When gate supplies its recorded `workspace_id`, read Herdr's workspace
+   guidance and add `--workspace <recorded-id>` before `--` in the launcher call
+   below, including delta/dispute reviews. Never omit it to recover from failure.
+   Otherwise use the fresh-workspace default; do not read the manual launch
+   reference just for an ordinary launch. For every gate review, including its
+   first standalone launch, return the launcher's workspace/tab/pane IDs and name
+   to the coordinator for its run log; preserve known IDs on launch failure too.
+   Return these alongside the review without changing its text.
 
    Set the Bash tool timeout to 600000ms and the initial wait to 300000ms;
    reserve the rest for launch, verification, extraction, and subprocess cleanup.

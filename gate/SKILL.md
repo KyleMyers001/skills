@@ -54,19 +54,56 @@ match, stop before phase 3. Unexpected product-tree drift → invalidate and sto
   `<run-id>-gate-evidence/` before phase 1; do not overwrite existing runs.
   Write a report on blocked stops too (state = blocked + reason).
 
+## Run workspace
+
+Use one Herdr workspace in `Subagents` for all workers in this run. This groups
+agent tabs, not Git worktrees or conversations; keep the absolute checkout and
+each worker's role/model/tool restrictions unchanged.
+
+- **Standalone:** the first reviewer launches without `--workspace`. Record its
+  returned `workspace_id` with `run-id` in `<run-id>-gate-run.md` before launching
+  another worker. Keep the launcher's label and use its returned root pane.
+- **Inside orchestrate-ticket:** before Phase 1, inspect the waiting developer's
+  live Herdr metadata and verify its workspace/checkout. Record that workspace
+  ID for gate; launch the first reviewer there too. Reuse the developer without
+  moving it or launching a replacement. Earlier ticket tabs may remain there.
+- Once selected, every new worker launch **must** pass `--workspace <recorded-id>`
+  before `--` to Herdr's launcher. This includes Astra/Fable, planner, executor,
+  auditor, developer, delta/dispute reviews, and all repair/re-audit cycles.
+  Read Herdr's workspace guidance; let the launcher validate live checkout
+  evidence and create each fresh agent's unfocused tab. Record returned worker
+  names and workspace/tab/pane IDs; they must agree with the run's workspace.
+- **Resume/failure:** reconcile the saved ID, live resources, and pending
+  submissions before continuing. Preserve known IDs on partial launch failure
+  and follow Herdr recovery. Missing, stale, or conflicting workspace state
+  blocks further launches until reconciled; never drop `--workspace` as a
+  fallback, guess by label/focus, or blindly relaunch. Wait on existing work.
+  Preserve run budgets; never automatically move, rename, or close resources.
+
+A new standalone run creates its own workspace; resuming a run does not. Ticket
+runs can reuse the waiting developer's workspace while keeping separate run logs
+and evidence directories.
+
 ## Roles
 
 | Role | Profile | Notes |
 | --- | --- | --- |
 | Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
-| Developer | `developer` | Scoped remediation + commits on the feature branch; no E2E authorship, push, or PR. **Standalone gate:** launch from `default-models.json`. **Inside orchestrate-ticket:** reuse the waiting ticket developer (keep its model); do not launch a second developer. |
+| Developer | `developer` | Scoped remediation; see constraints below. |
 | E2E planner | `e2e_planner` | Charter + evidence requirements. |
 | E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); `exclude_tools` blocks product-tree edit/write. Orchestrator may assemble the formal record from the reply into that dir. |
-| Auditor | `auditor` | Separate launch. After every execution **record**. Confirms disposable-path list is untracked non-source only. |
+| Auditor | `auditor` | Separate launch after every execution **record**. |
 | Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
 | Publish | — | Phase 6 when a remote exists. |
 
-Handoffs: absolute paths, `run-id`, baseline HEAD/identity, scope, return fields.
+Developer commits fixes on the feature branch; no E2E authorship, push, or PR.
+**Standalone gate:** launch from `default-models.json`. **Inside
+orchestrate-ticket:** reuse the waiting ticket developer (keep its model); do
+not launch a second developer. Auditor confirms the disposable-path list is
+untracked non-source only.
+
+Handoffs: absolute paths, `run-id`, selected `workspace_id` (once established),
+baseline HEAD/identity, scope, return fields.
 Consume accessible answers even if labels are messy — record missing fields as
 uncertainty in the run log/report. Escalate only when **severity labels** (must-fix
 set) or **auditor cause** are substantively unresolved so routing cannot proceed;
@@ -203,5 +240,6 @@ safety-sensitive needs; unexpected identity drift; audit undecidable (missing
 cause); publish failure. Preserve useful work; still write the blocked report.
 
 [closed-loop](../closed-loop/SKILL.md) is upstream implementation — not part of
-gate unless Kyle asks separately. [orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md)
-may invoke gate for verify/deliver; gate owns publish when an explicit push remote is recorded.
+gate unless Kyle asks separately.
+[orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md) may invoke gate
+for verify/deliver; gate owns publish when an explicit push remote is recorded.
