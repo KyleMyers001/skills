@@ -150,9 +150,10 @@ After preflight and developer handoff:
 2. Run gate as verify/deliver. Preserve requirements, exclusions, acceptance
    criteria, later decisions, tradeoffs, and plan reference in the gate scope.
    Phases: review → E2E plan → execute → audit → report → **publish**.
-3. Record `run-id`, submitted HEAD, post-gate HEAD, PR URL, and write ownership.
-   Once gate is active, developer remediations go through gate's developer
-   budget; the orchestrator does not apply local product fixes outside that path.
+3. Record `run-id`, submitted HEAD, post-gate HEAD, PR URL (or local-only), and
+   write ownership. Once gate is active, remediations reuse the waiting ticket
+   developer under gate's remediation budget (do not launch a second developer);
+   the orchestrator does not apply local product fixes outside that path.
 4. At each gate stop/escalate, read the full findings. Resolve only in-scope,
    low-risk decisions within existing authorization. Relay ask-user items
    verbatim to Kyle; protected-path and scope/behavior changes also need Kyle.
@@ -163,10 +164,11 @@ After preflight and developer handoff:
    developer/evidence budgets before any follow-up. Never improvise reset, force,
    or branch replacement. A new gate invocation consumes the remaining attempt
    budget.
-7. Stop when gate has published/updated the PR and the gate report is ready (or
-   blocked). Do not merge. Inspect the gate report, evidence links, PR URL,
-   final HEAD, and any required-check status gate recorded. Missing or
-   UNVERIFIED required evidence blocks readiness.
+7. Stop when the gate report is ready — published PR, `verified, unpublished
+   (local-only)`, `published, CI pending`, or blocked. Do not merge. Inspect the
+   gate report, evidence links, PR URL or unpublished note, final HEAD, and
+   required-check status. Missing/UNVERIFIED evidence or failed checks block
+   readiness; CI pending after gate's bounded wait is reportable but not green.
 
 Map required acceptance evidence to the final HEAD. Gate remediations invalidate
 prior execution evidence until a full charter re-run on the new baseline.

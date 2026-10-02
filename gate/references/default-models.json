@@ -22,8 +22,9 @@
   "auditor": {
     "kind": "pi",
     "model": "openai-codex/gpt-5.6-terra",
+    "thinking": "high",
     "exclude_tools": "edit,write",
-    "expect_startup": ["gpt-5.6-terra"]
+    "expect_startup": ["gpt-5.6-terra", "gpt-5.6-terra • high"]
   },
   "developer": {
     "kind": "pi",

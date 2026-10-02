@@ -31,7 +31,9 @@ Before delegation, read [Herdr](../herdr/SKILL.md) and the
   [developer](../../developer/SKILL.md). Sole implementation writer before the
   pipeline; no child agents or independent delivery.
 - Verifier/delivery: [gate](../../gate/SKILL.md). Orchestrator drives it;
-  developer relinquishes write ownership.
+  developer relinquishes write ownership. Gate remediations **reuse this same
+  waiting ticket developer** (keep `gpt-5.6-sol`); do not launch gate's JSON
+  developer profile inside an orchestrate-ticket run.
 
 Resolve planner/developer models and verify their live identity using the
 runbook. Missing/mismatched worker profiles require Kyle's decision, never silent
@@ -67,11 +69,12 @@ approval or restart.
    runbook's safety preflight before starting verification. Preserve complete
    user intent. Drive the gate pipeline rather than editing code; escalate
    human-only decisions.
-7. **Report:** stop when gate has published/updated the PR and the gate report
-   is ready for Kyle's review; never merge. Report PR URL, full final HEAD,
-   charter checks (including standard unit/lint when in scope), gate
-   remediations, exceptions, evidence, and blockers. Final-head acceptance
-   evidence is required; skipped/unrunnable checks are not green.
+7. **Report:** stop when the gate report is ready (published PR, local-only
+   unpublished, or blocked); never merge. Report PR URL or `unpublished
+   (local-only)`, full final HEAD, charter checks (including standard unit/lint
+   when in scope), gate remediations, exceptions, evidence, and blockers.
+   Accept `published, CI pending` after gate's bounded check wait; skipped,
+   unrunnable, or still-pending required checks are not green.
 
 ## Stop and Resume
 
