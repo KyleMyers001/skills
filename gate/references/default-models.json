@@ -10,7 +10,6 @@
     "kind": "pi",
     "model": "openai-codex/gpt-6.1-sol",
     "thinking": "high",
-    "exclude_tools": "edit,write",
     "expect_startup": ["gpt-6.1-sol", "gpt-6.1-sol • high"]
   },
   "qa": {

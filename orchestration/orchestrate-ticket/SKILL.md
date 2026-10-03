@@ -19,72 +19,57 @@ Before delegation, read [Herdr](../herdr/SKILL.md) and the
 
 ## Roles
 
-- Orchestrator: use the current session's selected model and reasoning level;
-  owns decisions, approval records, handoffs, pipeline gates, and reporting.
-  Do not require a particular profile or prompt Kyle to switch. No ticket-code
-  edits.
-- Planner: one Pi agent, `openai-codex/gpt-6-astra`, high reasoning; uses
-  [planning](../../planning/SKILL.md), not `astra-review`. Investigates and writes
-  the plan only; no target edits or child agents.
-- Developer: one Pi agent, `openai-codex/gpt-5.6-sol`, high reasoning; uses
-  [closed-loop](../../closed-loop/SKILL.md) and
-  [developer](../../developer/SKILL.md). Sole implementation writer before the
-  pipeline; no child agents or independent delivery.
-- Verifier/delivery: [gate](../../gate/SKILL.md). Orchestrator drives it;
-  developer relinquishes write ownership. Gate remediations **reuse this same
-  waiting ticket developer** (keep `gpt-5.6-sol`); do not launch gate's JSON
-  developer profile inside an orchestrate-ticket run.
-
-Resolve planner/developer models and verify their live identity using the
-runbook. Missing/mismatched worker profiles require Kyle's decision, never silent
-substitution. Changing the orchestrator's model or reasoning does not require
-approval or restart.
+- Orchestrator: the current session's selected model and reasoning. Owns
+  decisions, approval records, handoffs, and pipeline gates. No ticket-code
+  edits. Do not ask Kyle to switch models. A model change does not need
+  approval or a restart.
+- Planner (`planner`) and developer (`developer`): Pi agents. Read model,
+  thinking, startup checks, and any tool exclusions from
+  [default-models.json](references/default-models.json). Do not copy those
+  values into prose or substitute a missing profile.
+  - Planner uses [planning](../../planning/SKILL.md), not `astra-review`.
+    It writes only the plan markdown. No target edits or child agents.
+  - Developer uses [closed-loop](../../closed-loop/SKILL.md) and
+    [developer](../../developer/SKILL.md). Sole implementation writer before
+    the pipeline. No child agents or independent delivery.
+- Verifier/delivery: [gate](../../gate/SKILL.md). The orchestrator drives it.
+  Remediations reuse the waiting ticket developer. Do not launch gate's
+  developer profile.
 
 ## Workflow
 
 1. **Intake:** resolve the original request, absolute repository, and acceptance
-   context. Ask about ambiguity. Check Herdr, checkout/branch ownership, and
-   gate prerequisites read-only (Herdr, models, checkout). Do not initialize or
-   reconfigure a repo.
+   context. Ask about ambiguity. Check Herdr, checkout, and gate prerequisites
+   read-only. If `git status --short` is non-empty, follow the runbook and stop
+   before planning. Do not initialize or reconfigure a repo.
 2. **Plan:** delegate once using the runbook's planner contract and planning's
    [closed-loop requirements](../../planning/references/closed-loop-plan.md).
-   Require delivery mode `commit-and-handoff` with the orchestrator as external
-   delivery owner. Inspect the actual plan and completion evidence; idle is not
-   success.
+   Require `commit-and-handoff` with the orchestrator as external delivery
+   owner. Inspect the saved plan. Idle is not success.
 3. **Human gate:** present the Markdown filename in inline code, revision,
    choices, and blockers. Stop for approval under planning's
    [Approval & Execution](../../planning/SKILL.md#approval--execution) contract.
-   Unqualified approval authorizes dispatching the developer without another
-   “proceed”; preserve explicit holds and handoff instructions. Material revisions
-   require fresh approval; do not approve on Kyle's behalf.
-4. **Implement:** after authorization, create/resume durable state and establish
-   a feature branch/worktree without disturbing unrelated work. Delegate the
-   exact approved plan and permission evidence to the developer. It validates
-   baseline drift, writes all planned tests first, implements, verifies, and
-   commits using closed-loop's bounded repair budget. No push or PR creation.
+   Unqualified approval dispatches the developer without another “proceed”.
+   Preserve holds and handoff instructions. Do not approve on Kyle's behalf.
+4. **Implement:** after authorization, follow the runbook for durable state and
+   checkout. The orchestrator creates or checks out the feature branch before
+   delegation. Delegate the exact approved plan and permission evidence. The
+   developer writes planned tests first, implements, verifies, and commits on
+   that branch. No push or PR.
 5. **Handoff:** inspect the developer report, committed HEAD, acceptance
    evidence, and branch identity. Missing evidence or relevant drift blocks
    submission. Confirm the developer has stopped writing.
-6. **Verify/deliver:** load [gate](../../gate/SKILL.md) and follow the
-   runbook's safety preflight before starting verification. Preserve complete
-   user intent. Drive the gate pipeline rather than editing code; escalate
-   human-only decisions.
-7. **Report:** stop when the gate report is ready (published PR, local-only
-   unpublished, or blocked); never merge. Report PR URL or `unpublished
-   (local-only)`, full final HEAD, charter checks (including standard unit/lint
-   when in scope), gate remediations, exceptions, evidence, and blockers.
-   Accept `published, CI pending` after gate's bounded check wait; skipped,
-   unrunnable, or still-pending required checks are not green.
+6. **Verify and report:** follow the runbook's Gate section, including its
+   report rule. Do not edit product code. Never merge.
 
 ## Stop and Resume
 
-Persist approval, ownership, identities, evidence, and counters as specified in
-the runbook. Reconcile live Herdr agents and the persisted gate run state
-(`run-id`, HEAD/digest, ownership, budgets, pending submissions) before
-resuming; never duplicate work or reset budgets. Cap fresh gate invocations at
-two per approved execution; reattachment is not a new invocation. Escalate
-external blockers immediately.
+Follow the runbook's Durable State and Recovery. Do not duplicate work, reset
+budgets, or clean up automatically. Uncertain custody, missing approval,
+material scope changes, exhausted limits, and missing required evidence mean
+stop and ask.
 
-Unapproved destructive operations, uncertain custody/approval, material scope
-changes, exhausted limits, and missing required evidence mean stop and ask.
-Never automatically clean up agents, panes, processes, branches, or worktrees.
+## Authoring
+
+[Evaluation cases](references/evaluation-cases.md) are an authoring fixture.
+Do not load that file during a run.
