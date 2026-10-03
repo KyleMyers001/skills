@@ -74,7 +74,7 @@ A new standalone run creates a workspace; resuming one does not.
 | --- | --- | --- |
 | Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
 | Developer | `developer` | Scoped remediation; see constraints below. |
-| E2E planner | `e2e_planner` | [planning](../planning/SKILL.md), E2E mode. Saves the charter under `~/Workbench/Plans/`; shell writes there only, product checkout read-only. |
+| E2E planner | `e2e_planner` | [planning](../planning/SKILL.md), E2E mode. Writes the charter markdown under `~/Workbench/Plans/` with edit/write. Product checkout read-only. |
 | E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); `exclude_tools` blocks product-tree edit/write. Orchestrator may assemble the formal record from the reply into that dir. |
 | Auditor | `auditor` | Separate launch after every execution **record**. |
 | Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
@@ -99,7 +99,9 @@ plan is a required artifact, not a formatting preference.
 Ordinary launches **must** use
 [references/default-models.json](references/default-models.json), except the
 orchestrate-ticket developer reuse rule above. Missing file/key → stop; never
-invent fields. Edit the JSON to change defaults.
+invent fields. Edit the JSON to change defaults. `e2e_planner` must not set
+`exclude_tools`; it writes the charter markdown. If that field is set, stop
+and ask.
 
 Each profile has `kind`, `model` (`provider/model`), optional `thinking`,
 optional `exclude_tools` (Pi) and/or `disallowed_tools` (Claude; set explicitly),
@@ -155,9 +157,10 @@ to absolute paths in the prompt). Do not run product tests or edit product files
 
 Assign `~/Workbench/Plans/<run-id>-e2e-test-plan.md` as the required deliverable.
 Pass its absolute path, the run log, evidence directory, acceptance/scope, and
-current baseline identity. Explicitly allow shell writes to that plan despite
-`edit`/`write` exclusions. Require the reference's compact format and a short
-reply with the absolute path, revision, coverage, and blockers — no inline plan.
+current baseline identity. edit/write stay available so it can save that
+markdown file. Do not edit product files. Require the reference's compact
+format and a short reply with the absolute path, revision, coverage, and
+blockers — no inline plan.
 
 Open the saved file before Phase 3; check the reference's coverage, standard
 commands, evidence contract, and teardown requirements. Record its absolute path
