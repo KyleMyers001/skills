@@ -6,6 +6,8 @@ It is not part of the execution path.
 Use these as supervised scenarios, not source-string assertions. Record observed
 actions separately from paper walkthroughs; no live trial is implied by lint.
 
+## Scenarios
+
 - Explicit orchestration selects this flow; bare Jira, planning, skill design,
   and single-agent closed-loop requests do not launch agents.
 - Any selected orchestrator model/reasoning, including a mid-run change,
@@ -43,5 +45,52 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Timeout, interrupted submission, stale HEAD, and missing logs do not duplicate
   work, invent approval, or reset counters. Exhausted budgets stop further work.
 - Skips, empty CI, and stale final-head evidence never become an unqualified pass.
+- Dirty intake stops before planning. A requested worktree needs Kyle's task
+  id/branch and a clean checkout; never auto-stash or commit unrelated work.
+- Approval freezes the exact plan revision/content. A changed digest is
+  investigated, not replaced; material changes require renewed approval.
+- Wrong checkout/base or another task's branch blocks checkout preparation.
+  Do not create a second branch or move the developer to a replacement checkout.
+- Before gate, stale HEAD, missing acceptance evidence, competing writers, or
+  missing developer workspace evidence blocks submission, not verification duty.
+- Interrupted gate attempts remain charged until reconciled; reattachment is
+  not a new invocation. Two fresh attempts exhaust the ticket's gate budget.
+- A pre-gate stop uses chat and, after authorization, both run logs; it does not
+  produce another Kyle-facing report. Gate's report remains the delivery report.
+- Local-only delivery ends verified but unpublished. Required CI pending or
+  failed, missing checks, and UNVERIFIED evidence never become readiness claims.
 - With a chosen pilot and resolved safety prerequisites, run one authorized
   non-production ticket to a review-ready PR without merging it.
+
+## Consolidation constraint map
+
+Use this before/after checklist when reviewing the single-file workflow.
+Former section names identify source responsibilities, not runtime dependencies.
+Each entry must remain covered by the destination and its explicitly named owner.
+
+- **Roles / trigger** → [Purpose and roles](../SKILL.md#purpose-and-roles):
+  opt-in, current coordinator model, planner/developer scope, no child agents.
+- **Preflight** → [Intake](../SKILL.md#1-intake): absolute repo, untrusted Jira,
+  clean checkout, model validation, writable planner, gate prerequisites,
+  branch-specific competing work, no automatic setup/cleanup.
+- **Launch and Wait** → [Workers](../SKILL.md#working-with-agents) and
+  [Herdr](../../herdr/SKILL.md): profile forwarding, separate fresh workspaces,
+  exact identities, startup/retrieval/recovery, ticket wait limits, no duplicates.
+- **Planner** → [Plan](../SKILL.md#2-plan-and-approval) and
+  [planning](../../../planning/SKILL.md): investigate, save/lint, repair defaults,
+  checkout/base, final-HEAD checks, permissions, external delivery owner.
+- **Approval and Checkout** → [Plan](../SKILL.md#2-plan-and-approval) and
+  [Implement](../SKILL.md#3-implement-and-handoff): exact authorization,
+  frozen digest, holds/assignment, safe branch preparation, baseline drift.
+- **Developer** → [Implement](../SKILL.md#3-implement-and-handoff) and
+  [closed-loop](../../../closed-loop/SKILL.md): tests first, bounded repairs,
+  verified commit including hook changes, handoff fields, no publication,
+  relinquished writing, scope/HEAD/evidence inspection.
+- **Gate verify/deliver** → [Gate](../SKILL.md#4-verify-and-deliver) and
+  [gate](../../../gate/SKILL.md): two fresh attempts, adopted developer workspace,
+  retained scope, existing developer, findings/ask-user handling, routing/audit,
+  evidence rerun on final HEAD, publication status, one report.
+- **Durable State and Recovery** → [Resume](../SKILL.md#state-stop-and-resume):
+  log timing/ownership, phase/blocker, approval/digest, checkout and worker IDs,
+  evidence/outcomes, all budgets, live-state reconciliation, no counter resets,
+  invented approval, automatic cleanup, or duplicate runs.
