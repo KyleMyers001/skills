@@ -68,6 +68,7 @@ def _make_proc(poll_results: list) -> MagicMock:
     proc.terminate.return_value = None
     proc.kill.return_value = None
     proc.wait.return_value = 0
+    proc.stderr = io.BytesIO()
     proc.stdin = MagicMock()
     proc.stdin.write.return_value = None
     proc.stdin.flush.return_value = None
@@ -90,7 +91,7 @@ class TestDrainFfplayNaturalExit(unittest.TestCase):
         """proc.poll() returns 0 on the very first check."""
         proc = _make_proc([0])
         dc = threading.Event()
-        rc = _drain_ffplay(proc, dc, bytes_written=8000, debug=False, _t=_no_timing())
+        rc = _drain_ffplay(proc, dc, bytes_written=8000, debug=False)
         self.assertEqual(rc, 0)
         proc.kill.assert_not_called()
         proc.terminate.assert_not_called()
@@ -103,7 +104,7 @@ class TestDrainFfplayNaturalExit(unittest.TestCase):
         orig_poll = airpods_say._DRAIN_POLL_SECS
         airpods_say._DRAIN_POLL_SECS = 0.01
         try:
-            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False)
         finally:
             airpods_say._DRAIN_POLL_SECS = orig_poll
         self.assertEqual(rc, 0)
@@ -140,6 +141,7 @@ class TestDrainFfplayNaturalExit(unittest.TestCase):
             return None if poll_count[0] <= 5 else 0
 
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.side_effect = _poll
         proc.kill.return_value = None
         dc = threading.Event()
@@ -150,7 +152,7 @@ class TestDrainFfplayNaturalExit(unittest.TestCase):
             with patch("airpods_say.time.monotonic", side_effect=_mono):
                 with patch("airpods_say.time.sleep"):   # no-op; no wall time spent
                     rc = _drain_ffplay(
-                        proc, dc, bytes_written=0, debug=False, _t=_no_timing()
+                        proc, dc, bytes_written=0, debug=False
                     )
         finally:
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
@@ -168,13 +170,14 @@ class TestDrainFfplayDeviceChange(unittest.TestCase):
         proc = _make_proc([None])  # never exits naturally
         dc = threading.Event()
         dc.set()
-        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False)
         self.assertEqual(rc, 3)
         proc.terminate.assert_called_once()
 
     def test_device_changes_mid_drain(self):
         """Device changes after a couple of polls."""
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None  # never exits naturally
         proc.terminate.return_value = None
         proc.kill.return_value = None
@@ -192,7 +195,7 @@ class TestDrainFfplayDeviceChange(unittest.TestCase):
 
             t = threading.Thread(target=_trigger, daemon=True)
             t.start()
-            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False)
             t.join(timeout=1)
         finally:
             airpods_say._DRAIN_POLL_SECS = orig_poll
@@ -206,7 +209,7 @@ class TestDrainFfplayDeviceChange(unittest.TestCase):
         dc = threading.Event()
         dc.set()  # already changed
 
-        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False)
 
         self.assertNotEqual(rc, 0, "Device change must not be reported as success")
         self.assertEqual(rc, 3)
@@ -214,6 +217,7 @@ class TestDrainFfplayDeviceChange(unittest.TestCase):
     def test_device_change_terminates_then_kills_on_timeout(self):
         """If terminate doesn't stop ffplay in 3 s, kill is called."""
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None
         proc.terminate.return_value = None
         # Simulate proc.wait raising TimeoutExpired
@@ -223,7 +227,7 @@ class TestDrainFfplayDeviceChange(unittest.TestCase):
         dc = threading.Event()
         dc.set()
 
-        rc = _drain_ffplay(proc, dc, bytes_written=1000, debug=False, _t=_no_timing())
+        rc = _drain_ffplay(proc, dc, bytes_written=1000, debug=False)
         self.assertEqual(rc, 3)
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
@@ -235,6 +239,7 @@ class TestDrainFfplaySafetyTimeout(unittest.TestCase):
     def _drain_with_tiny_timeout(self, bytes_written: int) -> int:
         """Run drain with _DRAIN_TIMEOUT_MIN_SECS patched to 0.05 s."""
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None  # never exits
         proc.kill.return_value = None
         dc = threading.Event()
@@ -244,7 +249,7 @@ class TestDrainFfplaySafetyTimeout(unittest.TestCase):
         airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.05
         airpods_say._DRAIN_POLL_SECS = 0.01
         try:
-            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False, _t=_no_timing())
+            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False)
         finally:
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
             airpods_say._DRAIN_POLL_SECS = orig_poll
@@ -265,6 +270,7 @@ class TestDrainFfplaySafetyTimeout(unittest.TestCase):
     def test_timeout_kills_process(self):
         """After timeout, proc.kill() must have been called."""
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None
         proc.kill.return_value = None
         dc = threading.Event()
@@ -274,7 +280,7 @@ class TestDrainFfplaySafetyTimeout(unittest.TestCase):
         airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.05
         airpods_say._DRAIN_POLL_SECS = 0.01
         try:
-            _drain_ffplay(proc, dc, bytes_written=0, debug=False, _t=_no_timing())
+            _drain_ffplay(proc, dc, bytes_written=0, debug=False)
         finally:
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
             airpods_say._DRAIN_POLL_SECS = orig_poll
@@ -348,11 +354,12 @@ class TestDrainFfplayDurationAwareTimeout(unittest.TestCase):
                 return None if call_count[0] < 5 else 0
 
             proc = MagicMock(spec=subprocess.Popen)
+            proc.stderr = io.BytesIO()
             proc.poll.side_effect = _poll
             proc.kill.return_value = None
             dc = threading.Event()
 
-            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False, _t=_no_timing())
+            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False)
         finally:
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
             airpods_say._DRAIN_TIMEOUT_MAX_SECS = orig_max
@@ -477,6 +484,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
         AirPods change after stream EOF but during drain → play_stream returns 3.
         """
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None  # never exits naturally
         proc.stdin = MagicMock()
         proc.kill.return_value = None
@@ -512,6 +520,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
         Drain safety timeout exceeded → play_stream does NOT return 0.
         """
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None  # hung forever
         proc.stdin = MagicMock()
         proc.kill.return_value = None
@@ -592,6 +601,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
         must return 1 with a concise stderr error, not false success 0.
         """
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None        # proc is nominally alive
         proc.stdin = MagicMock()
         proc.stdin.write.side_effect = BrokenPipeError("broken pipe")
@@ -606,6 +616,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
     def test_broken_pipe_not_zero(self):
         """Regression: BrokenPipeError must never be reported as success."""
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None
         proc.stdin = MagicMock()
         proc.stdin.write.side_effect = BrokenPipeError("broken pipe")
@@ -633,6 +644,7 @@ class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
         play_stream returns 3 and does not enter the drain path.
         """
         proc = MagicMock(spec=subprocess.Popen)
+        proc.stderr = io.BytesIO()
         proc.poll.return_value = None
         proc.stdin = MagicMock()
         proc.kill.return_value = None
@@ -718,6 +730,7 @@ class _Player:
         self.killed = False
         self.on_write = None
         self.stdin = self
+        self.stderr = io.BytesIO()
 
     def fileno(self):
         return 9999  # os.set_blocking is patched; no real player is launched
@@ -1041,7 +1054,7 @@ class TestStreamReader(unittest.TestCase):
                     [sys.executable, "-c",
                      f"import sys; data=sys.stdin.buffer.read(); "
                      f"print(len(data)); sys.exit({status})"],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                 )
                 try:
                     with patch("airpods_say.subprocess.Popen", return_value=proc), \
@@ -1075,6 +1088,7 @@ class TestStreamReader(unittest.TestCase):
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
                 self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
                 self.send_header("Content-Length", "100")
                 self.end_headers()
                 self.wfile.flush()
@@ -1107,8 +1121,7 @@ class TestDrainFailedStatus(unittest.TestCase):
                 with self.subTest(status=status, polls=polls), \
                         patch("airpods_say._DRAIN_POLL_SECS", 0.001):
                     self.assertEqual(_drain_ffplay(
-                        _make_proc(polls), threading.Event(), 8000, False,
-                        _no_timing()), 1)
+                        _make_proc(polls), threading.Event(), 8000, False), 1)
 
 
 # ---------------------------------------------------------------------------

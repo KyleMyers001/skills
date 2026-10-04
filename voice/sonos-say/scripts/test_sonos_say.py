@@ -20,6 +20,7 @@ or:
 from __future__ import annotations
 
 import io
+import contextlib
 import logging
 import os
 import signal
@@ -76,9 +77,11 @@ _TEST_ENV = patch.dict(os.environ, {
 
 def setUpModule():
     _TEST_ENV.start()
+    _EVENT_FIXTURE.start()
 
 
 def tearDownModule():
+    _EVENT_FIXTURE.stop()
     _TEST_ENV.stop()
 
 
@@ -94,6 +97,9 @@ def _set_standalone(sp: MagicMock) -> MagicMock:
     sp.is_visible = True
     sp.zone_group_state.has_subscriptions = False
     sp.is_coordinator = True
+    sp.mute = False
+    sp.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
+    sp.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
     sp.group = SimpleNamespace(coordinator=sp, members=[sp])
     return sp
 
@@ -115,6 +121,65 @@ def _make_volume_tracked_speaker(
         lambda self, v: log.append(v),
     )
     return sp, log
+
+
+def _synthesise_fixture(*args, **kwargs):
+    args[4].write_bytes(b"synthetic-mp3")
+
+
+@contextlib.contextmanager
+def _snapshot_patch():
+    # Keep call assertions while supplying Snapshot's real public field shapes.
+    with patch("sonos_say.Snapshot") as factory:
+        snap = factory.return_value
+        snap.media_uri, snap.mute, snap.transport_state = "prior-uri", False, "STOPPED"
+        snap.is_playing_queue = snap.is_playing_cloud_queue = False
+
+        def create(speaker):
+            snap.mute = speaker.mute
+            effect = snap.restore.side_effect
+            def restore(**kwargs):
+                if callable(effect):
+                    effect(**kwargs)
+                elif isinstance(effect, BaseException):
+                    raise effect
+                elif effect is not None:
+                    result = next(effect)
+                    if isinstance(result, BaseException):
+                        raise result
+                _restore_fixture(speaker, snap)
+            snap.restore.side_effect = restore
+            return snap
+
+        factory.side_effect = create
+        yield factory
+
+
+def _restore_fixture(speaker, snapshot):
+    speaker.mute = snapshot.mute
+    speaker.avTransport.GetMediaInfo.return_value = {"CurrentURI": snapshot.media_uri or ""}
+    if snapshot.media_uri:
+        speaker.get_current_transport_info.side_effect = None
+        speaker.get_current_transport_info.return_value = {"current_transport_state": "STOPPED"}
+
+
+class _EventFixture:
+    def __init__(self, speaker, uri):
+        self.speaker = speaker
+        self.queue = sonos_say._TransportEventQueue(uri)
+
+    def start(self):
+        pass
+
+    def arm(self):
+        self.queue.arm("test-attempt")
+        self.speaker.avTransport.GetMediaInfo.return_value = {"CurrentURI": self.queue.uri}
+
+    def close(self):
+        self.queue.close()
+
+
+_EVENT_FIXTURE = patch("sonos_say._TransportEvents", _EventFixture)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +413,7 @@ class TestGetApiKey(unittest.TestCase):
 
     def test_success(self):
         with patch("subprocess.run") as mr:
-            mr.return_value = MagicMock(stdout="sk-testkey\n")
+            mr.return_value = MagicMock(returncode=0, stdout="sk-testkey\n")
             self.assertEqual(
                 sonos_say.get_api_key("test-service", "test-account"),
                 "sk-testkey",
@@ -356,7 +421,7 @@ class TestGetApiKey(unittest.TestCase):
             mr.assert_called_once_with(
                 ["/usr/bin/security", "find-generic-password", "-s", "test-service",
                  "-a", "test-account", "-w"],
-                capture_output=True, text=True, check=True, timeout=10,
+                capture_output=True, text=True, timeout=10,
             )
 
     def test_empty_result_raises(self):
@@ -413,7 +478,7 @@ class TestApiKeySecrecy(unittest.TestCase):
             fp=fake_resp,
         )
 
-        with patch("sonos_say._tts_opener") as opener:
+        with patch("elevenlabs_voice.tts_opener") as opener:
             opener.return_value.open.side_effect = http_error
             try:
                 sonos_say.synthesise_mp3(
@@ -511,11 +576,11 @@ class TestAnnounceOrchestration(unittest.TestCase):
         ]
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=mock_speaker),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -553,11 +618,11 @@ class TestAnnounceOrchestration(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -582,11 +647,11 @@ class TestAnnounceOrchestration(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -612,11 +677,11 @@ class TestAnnounceOrchestration(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -653,6 +718,9 @@ class TestGroupedAnnouncement(unittest.TestCase):
         coordinator.zone_group_state.has_subscriptions = False
         target.ip_address = "192.168.1.50"
         target.volume = 30
+        target.mute = coordinator.mute = False
+        for sp in (target, coordinator):
+            sp.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
 
         def _group(coord, members):
             group = SimpleNamespace(
@@ -689,7 +757,10 @@ class TestGroupedAnnouncement(unittest.TestCase):
             patch("sonos_say.get_api_key", return_value="sk-fake"),
             patch(
                 "sonos_say.synthesise_mp3",
-                side_effect=synthesise_effect,
+                side_effect=(lambda *a, **kw: (
+                    synthesise_effect(*a, **kw) if callable(synthesise_effect) else None,
+                    _synthesise_fixture(*a, **kw))) if not isinstance(synthesise_effect, BaseException)
+                else synthesise_effect,
             ),
             patch("sonos_say.discover_speaker", return_value=target),
             patch(
@@ -697,7 +768,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
                 return_value="192.168.1.10",
             ),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as snapshot_type,
+            _snapshot_patch() as snapshot_type,
             patch(
                 "sonos_say.wait_for_playback",
                 side_effect=wait_effect
@@ -784,6 +855,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
 
         def _synthesise(*args, **kwargs):
             events.append("synthesise")
+            _synthesise_fixture(*args, **kwargs)
 
         self._announce(target, synthesise_effect=_synthesise)
 
@@ -862,10 +934,10 @@ class TestGroupedAnnouncement(unittest.TestCase):
             with patch("sonos_say.get_api_key", side_effect=lambda *a:
                        events.append("key") or "dummy-key"), \
                     patch("sonos_say.synthesise_mp3", side_effect=lambda *a, **kw:
-                          events.append("synth")), \
+                          (events.append("synth"), _synthesise_fixture(*a, **kw))), \
                     patch("sonos_say.local_ip_toward", return_value="192.0.2.1"), \
                     patch("sonos_say.serve_file") as serve, \
-                    patch("sonos_say.Snapshot") as snapshot, \
+                    _snapshot_patch() as snapshot, \
                     patch("sonos_say.wait_for_playback", return_value=True):
                 serve.return_value.__enter__.return_value = "http://192.0.2.1/audio"
                 snapshot.return_value.media_uri = "prior-uri"
@@ -996,14 +1068,12 @@ class TestGroupedAnnouncement(unittest.TestCase):
     def test_cleanup_interrupt_then_failure_prefers_restore(self):
         _, events, target = self._grouped_speakers()
 
+        def interrupted_failure(**kwargs):
+            os.kill(os.getpid(), signal.SIGINT)
+            raise RuntimeError("restore failed")
+
         with self.assertRaises(sonos_say.SonosSayError) as raised:
-            self._announce(
-                target,
-                snapshot_restore_effect=[
-                    KeyboardInterrupt(),
-                    RuntimeError("restore failed"),
-                ],
-            )
+            self._announce(target, snapshot_restore_effect=interrupted_failure)
 
         self.assertEqual(raised.exception.code, "SONOS_RESTORE_FAILED")
         self.assertEqual(events, ["detach", "rejoin"])
@@ -1011,12 +1081,13 @@ class TestGroupedAnnouncement(unittest.TestCase):
     def test_interrupt_at_cleanup_deferral_entry_still_restores(self):
         coordinator, events, target = self._grouped_speakers()
         snapshots = []
-        real_defer = sonos_say._defer_cleanup_signals
+        real_begin = sonos_say._MutationSignalGuard.begin_cleanup
 
-        with patch(
-            "sonos_say._defer_cleanup_signals",
-            side_effect=[SystemExit(143), real_defer()],
-        ):
+        def boundary(guard):
+            os.kill(os.getpid(), signal.SIGTERM)
+            real_begin(guard)
+
+        with patch.object(sonos_say._MutationSignalGuard, "begin_cleanup", boundary):
             with self.assertRaises(SystemExit) as raised:
                 self._announce(target, snapshot_capture=snapshots)
 
@@ -1056,11 +1127,12 @@ class TestGroupedAnnouncement(unittest.TestCase):
         coordinator, events, target = self._grouped_speakers()
         snapshots = []
 
-        with patch.object(
-            sonos_say._MutationSignalGuard,
-            "begin_cleanup",
-            side_effect=SystemExit(143),
-        ):
+        real_begin = sonos_say._MutationSignalGuard.begin_cleanup
+        def boundary(guard):
+            os.kill(os.getpid(), signal.SIGTERM)
+            real_begin(guard)
+
+        with patch.object(sonos_say._MutationSignalGuard, "begin_cleanup", boundary):
             with self.assertRaises(SystemExit) as raised:
                 self._announce(target, snapshot_capture=snapshots)
 
@@ -1086,11 +1158,11 @@ class TestGroupedAnnouncement(unittest.TestCase):
             (True, None),
             (RuntimeError("playback failed"), sonos_say.SonosSayError),
             (
-                lambda *args: os.kill(os.getpid(), signal.SIGINT),
+                lambda *args, **kwargs: os.kill(os.getpid(), signal.SIGINT),
                 KeyboardInterrupt,
             ),
             (
-                lambda *args: os.kill(os.getpid(), signal.SIGTERM),
+                lambda *args, **kwargs: os.kill(os.getpid(), signal.SIGTERM),
                 SystemExit,
             ),
         )
@@ -1160,11 +1232,11 @@ class TestSigtermHandling(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1195,11 +1267,11 @@ class TestSigtermHandling(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1228,11 +1300,11 @@ class TestSigtermHandling(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1642,11 +1714,11 @@ class TestRestoreOrderingAndFade(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -1726,11 +1798,11 @@ class TestEmptyUriClearing(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -1816,11 +1888,11 @@ class TestEmptyUriClearing(unittest.TestCase):
         try:
             with (
                 patch("sonos_say.get_api_key", return_value="sk-fake"),
-                patch("sonos_say.synthesise_mp3"),
+                patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
                 patch("sonos_say.discover_speaker", return_value=sp),
                 patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
                 patch("sonos_say.serve_file") as mock_serve,
-                patch("sonos_say.Snapshot") as MockSnapshot,
+                _snapshot_patch() as MockSnapshot,
                 patch("time.sleep"),
             ):
                 mock_serve.return_value.__enter__ = MagicMock(
@@ -1879,11 +1951,11 @@ class TestInterruptCleanupOrdering(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1934,11 +2006,11 @@ class TestInterruptCleanupOrdering(unittest.TestCase):
 
         with (
             patch("sonos_say.get_api_key", return_value="sk-fake"),
-            patch("sonos_say.synthesise_mp3"),
+            patch("sonos_say.synthesise_mp3", side_effect=_synthesise_fixture),
             patch("sonos_say.discover_speaker", return_value=sp),
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
-            patch("sonos_say.Snapshot") as MockSnapshot,
+            _snapshot_patch() as MockSnapshot,
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -1958,12 +2030,16 @@ class TestInterruptCleanupOrdering(unittest.TestCase):
 
 
 class TestRestoreVerification(unittest.TestCase):
-    def _restore(self, speaker, snapshot):
+    def _restore(self, speaker, snapshot, detached=True):
+        snapshot.mute = False
         with patch("sonos_say.restore_target_group") as regroup:
             result = sonos_say._restore_after_announcement(
-                speaker, snapshot, True, 30, MagicMock(), True,
+                speaker, snapshot, True, 30, MagicMock(), detached,
             )
-        regroup.assert_called_once()
+        if detached:
+            regroup.assert_called_once()
+        else:
+            regroup.assert_not_called()
         snapshot.restore.assert_called_once_with(fade=False)
         return result
 
@@ -1994,7 +2070,7 @@ class TestRestoreVerification(unittest.TestCase):
                     sp.get_current_track_info.side_effect = result
                 else:
                     sp.get_current_track_info.return_value = result
-                failed, _ = self._restore(sp, MagicMock(media_uri=""))
+                failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
                 self.assertTrue(failed)
                 sp.avTransport.SetAVTransportURI.assert_called_once()
 
@@ -2003,14 +2079,14 @@ class TestRestoreVerification(unittest.TestCase):
         type(sp).is_coordinator = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("offline")),
         )
-        failed, _ = self._restore(sp, MagicMock(media_uri=""))
+        failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
         self.assertTrue(failed)
         self.assertEqual(sp.volume, 30)
 
     def test_unknown_coordinator_flag_is_failure(self):
         sp = _set_standalone(MagicMock())
         sp.is_coordinator = None
-        failed, _ = self._restore(sp, MagicMock(media_uri=""))
+        failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
         self.assertTrue(failed)
 
     def test_uri_cleanup_attempts_clear_but_does_not_hide_transport_error(self):
@@ -2023,7 +2099,7 @@ class TestRestoreVerification(unittest.TestCase):
                     sp.get_current_transport_info.side_effect = result
                 else:
                     sp.get_current_transport_info.return_value = result
-                failed, _ = self._restore(sp, MagicMock(media_uri=""))
+                failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
                 self.assertTrue(failed)
                 sp.avTransport.SetAVTransportURI.assert_called_once()
 

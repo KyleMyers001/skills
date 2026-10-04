@@ -24,7 +24,6 @@ import ctypes.util
 import http.client
 import json
 import os
-import re
 import queue
 import signal
 import socket
@@ -33,7 +32,6 @@ import sys
 import threading
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -45,12 +43,14 @@ _POLICY_DIR = (
 if str(_POLICY_DIR) not in sys.path:
     sys.path.insert(0, str(_POLICY_DIR))
 
+import elevenlabs_voice as voice_policy  # noqa: E402
 from elevenlabs_voice import (  # noqa: E402
     DEFAULT_MODEL_ID,
     STABILITY_PRESETS,
     StabilityPreset,
     resolve_stability,
     validate_model_id,
+    validate_voice_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,9 +66,6 @@ ELEVENLABS_STREAM_URL = (
 )
 
 FFPLAY_PRIMARY = "/opt/homebrew/bin/ffplay"
-
-# Strict allowlists — only patterns matching known safe IDs are accepted.
-_VOICE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 # ---------------------------------------------------------------------------
 # Streaming read tuning
@@ -244,10 +241,16 @@ def _get_default_output_device_name_coreaudio() -> str:
         cf.CFRelease.restype = None
         cf.CFRelease.argtypes = [ctypes.c_void_p]
 
+        cf.CFStringGetLength.restype = ctypes.c_long
+        cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
         cf.CFStringGetMaximumSizeForEncoding.restype = ctypes.c_long
-        cf.CFStringGetMaximumSizeForEncoding.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        cf.CFStringGetMaximumSizeForEncoding.argtypes = [ctypes.c_long, ctypes.c_uint32]
         kCFStringEncodingUTF8 = 0x08000100
-        max_len = cf.CFStringGetMaximumSizeForEncoding(cfstr, kCFStringEncodingUTF8) + 1
+        length = cf.CFStringGetLength(cfstr)
+        maximum = cf.CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8)
+        if length < 0 or maximum < 0 or maximum >= sys.maxsize:
+            raise CoreAudioError("Invalid CFString conversion size")
+        max_len = maximum + 1
 
         buf = ctypes.create_string_buffer(max_len)
         cf.CFStringGetCString.restype = ctypes.c_bool
@@ -373,35 +376,10 @@ def get_keychain_password(service: str, account: str) -> str:
 
     Raises KeychainError on failure.
     """
-    cmd = [
-        "/usr/bin/security",
-        "find-generic-password",
-        "-s", service,
-        "-a", account,
-        "-w",   # print password only
-    ]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        raise KeychainError("Keychain lookup timed out")
-    except FileNotFoundError:
-        raise KeychainError("`security` binary not found — not on macOS?")
-
-    if result.returncode != 0:
-        # Don't expose stderr (may contain partial key info)
-        raise KeychainError(
-            f"Keychain lookup failed (exit {result.returncode}). "
-            "Check ELEVENLABS_KEYCHAIN_SERVICE and ELEVENLABS_KEYCHAIN_ACCOUNT."
-        )
-    key = result.stdout.strip()
-    if not key:
-        raise KeychainError("Keychain returned an empty password")
-    return key
+        return voice_policy.keychain_password(service, account)
+    except voice_policy.KeychainLookupError as exc:
+        raise KeychainError(str(exc)) from None
 
 
 # ---------------------------------------------------------------------------
@@ -548,16 +526,6 @@ class ElevenLabsError(Exception):
     pass
 
 
-class _RejectRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", {}, fp)
-
-
-def _tts_opener():
-    """Private request boundary: never forward credentials on redirects."""
-    return urllib.request.build_opener(_RejectRedirects())
-
-
 def stream_tts(
     api_key: str,
     text: str,
@@ -574,43 +542,15 @@ def stream_tts(
 
     Raises ElevenLabsError on non-200 or connectivity failure.
     """
-    url = (
-        ELEVENLABS_STREAM_URL.format(voice_id=urllib.parse.quote(voice_id, safe=""))
-        + "?" + urllib.parse.urlencode({"output_format": output_format})
-    )
-    payload_data = {"text": text, "model_id": model_id}
-    if stability is not None:
-        payload_data["voice_settings"] = {
-            "stability": stability.value,
-        }
-    payload = json.dumps(payload_data).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "xi-api-key": api_key,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        },
-    )
-
-    if debug:
-        print(f"[debug] POST {url}", file=sys.stderr)
-
+    validate_ids(voice_id, model_id)
+    endpoint = ELEVENLABS_STREAM_URL.format(voice_id=urllib.parse.quote(voice_id, safe=""))
     try:
-        resp = _tts_opener().open(req, timeout=timeout)
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        # Provider-controlled reasons, bodies, and destinations are private.
-        raise ElevenLabsError(f"ElevenLabs API returned HTTP {exc.code}") from None
-    except urllib.error.URLError:
-        raise ElevenLabsError("ElevenLabs request failed") from None
-    except (OSError, http.client.HTTPException):
-        raise ElevenLabsError("ElevenLabs request failed") from None
-
-    return resp
+        return voice_policy.open_tts(endpoint, api_key, text, model_id,
+                                     output_format, timeout, stability)
+    except voice_policy.TTSRequestError as exc:
+        message = (f"ElevenLabs API returned HTTP {exc.status}" if exc.status is not None
+                   else "ElevenLabs request failed")
+        raise ElevenLabsError(message) from None
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +562,6 @@ def _drain_ffplay(
     device_changed: "threading.Event",
     bytes_written: int,
     debug: bool,
-    _t: "_Timing",
 ) -> int:
     """
     Wait for ffplay to drain its audio buffer after stdin EOF.
@@ -668,15 +607,7 @@ def _drain_ffplay(
     while True:
         # Device change: fail-closed, always checked first.
         if device_changed.is_set():
-            print(
-                "AirPods output changed or disconnected mid-playback. Stopping.",
-                file=sys.stderr,
-            )
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _stop_ffplay(proc)
             return 3
 
         status = proc.poll()
@@ -777,6 +708,38 @@ def _stop_ffplay(proc) -> None:
             pass
 
 
+class _PlayerDiagnostics:
+    """Drain error-level stderr continuously; never expose raw decoder output."""
+
+    LIMIT = 4096
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.buffer = bytearray()
+        self.failed = False
+        self.thread = threading.Thread(target=self._read,
+                                       name="airpods-player-errors", daemon=True)
+
+    def _read(self):
+        try:
+            while True:
+                data = self.stream.read(1024)
+                if not data:
+                    break
+                if data.strip():
+                    self.failed = True  # latched independently of the bounded buffer
+                self.buffer.extend(data[:max(0, self.LIMIT - len(self.buffer))])
+        except Exception:
+            self.failed = True
+
+    def finish(self):
+        self.thread.join(timeout=3)
+        if self.thread.is_alive():
+            self.failed = True
+        else:
+            self.stream.close()
+
+
 def play_stream(
     resp: http.client.HTTPResponse,
     ffplay_path: str,
@@ -810,7 +773,8 @@ def play_stream(
         ffplay_path,
         "-nodisp",           # no video window
         "-autoexit",         # exit when done
-        "-loglevel", "quiet" if not debug else "warning",
+        "-nostats",          # stderr contains errors, not terminal progress controls
+        "-loglevel", "error",
         "-i", "pipe:0",      # read from stdin
     ]
 
@@ -825,7 +789,7 @@ def play_stream(
             ffplay_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=None if debug else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
     except BaseException:
@@ -833,6 +797,7 @@ def play_stream(
         raise
 
     reader = _StreamReader(resp)
+    diagnostics = _PlayerDiagnostics(proc.stderr)
     _t.mark("ffplay-start")
 
     # Signal handling: forward SIGINT/SIGTERM to ffplay.
@@ -848,7 +813,10 @@ def play_stream(
     # Device monitor in a background thread.
     # Performs an immediate check first, then waits between subsequent polls.
     device_changed = threading.Event()
+    monitor_ready = threading.Event()
     monitor_stop = threading.Event()
+    completion_lock = threading.Lock()
+    completed = False
 
     def _monitor_device():
         # Immediate check before the first sleep so a pre-existing change is
@@ -856,13 +824,16 @@ def play_stream(
         while not monitor_stop.is_set():
             try:
                 current = get_default_output_device_name()
-            except CoreAudioError:
-                # Can't read device — fail closed.
-                device_changed.set()
-                break
-            if not is_airpods_device(current) or current != expected_device_name:
-                device_changed.set()
-                break
+            except Exception:
+                current = None  # detection failures are fail-closed
+            with completion_lock:
+                if completed or monitor_stop.is_set():
+                    break
+                if (not isinstance(current, str) or not is_airpods_device(current)
+                        or current != expected_device_name):
+                    device_changed.set()
+                    break
+                monitor_ready.set()
             # Wait before next poll; exit early if main loop signals done.
             monitor_stop.wait(poll_interval)
 
@@ -889,21 +860,20 @@ def play_stream(
         # Unbuffered, nonblocking stdin keeps a stalled player from preventing
         # device checks, cancellation, or a bounded close of the player's pipe.
         os.set_blocking(proc.stdin.fileno(), False)
+        diagnostics.thread.start()
         reader.thread.start()
         monitor_thread.start()
+        readiness_deadline = time.monotonic() + timeout
+        while not monitor_ready.is_set() and not device_changed.is_set():
+            remaining = readiness_deadline - time.monotonic()
+            if remaining <= 0:
+                device_changed.set()
+                break
+            monitor_ready.wait(min(0.05, remaining))
         last_audio = time.monotonic()
         while True:
             # Check device change
             if device_changed.is_set():
-                print(
-                    "AirPods output changed or disconnected mid-playback. Stopping.",
-                    file=sys.stderr,
-                )
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
                 exit_code = 3
                 break
 
@@ -912,16 +882,9 @@ def play_stream(
             # caused ffplay to die, report exit 3 rather than 1.
             if proc.poll() is not None:
                 if device_changed.is_set():
-                    print(
-                        "AirPods output changed or disconnected mid-playback. Stopping.",
-                        file=sys.stderr,
-                    )
                     exit_code = 3
                 else:
-                    print(
-                        "Playback error: ffplay exited unexpectedly before stream EOF.",
-                        file=sys.stderr,
-                    )
+                    print("Playback error: ffplay exited before stream EOF.", file=sys.stderr)
                     exit_code = 1
                 break
 
@@ -956,23 +919,26 @@ def play_stream(
                 _t.mark("stream-eof")
                 # Device check at EOF before entering drain phase.
                 if device_changed.is_set():
-                    print(
-                        "AirPods output changed or disconnected mid-playback. Stopping.",
-                        file=sys.stderr,
-                    )
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
                     exit_code = 3
                     break
-                # Close stdin (signals EOF to ffplay) then drain buffered audio.
-                # _drain_ffplay() monitors the device throughout the drain phase.
+                if bytes_written == 0:
+                    print("ElevenLabs returned empty audio.", file=sys.stderr)
+                    exit_code = 5
+                    break
                 _close_stdin_safe()
-                exit_code = _drain_ffplay(
-                    proc, device_changed, bytes_written, debug, _t
-                )
+                exit_code = _drain_ffplay(proc, device_changed, bytes_written, debug)
+                # Exit zero is insufficient: ffplay can report decoder errors
+                # and still exit zero. Join the continuously drained error pipe.
+                diagnostics.finish()
+                if exit_code == 0 and diagnostics.failed:
+                    print("Playback error: decoder/player reported an error.", file=sys.stderr)
+                    exit_code = 1
+                # Freeze the result at confirmed completion, not resource teardown.
+                with completion_lock:
+                    if device_changed.is_set():
+                        exit_code = 3
+                    completed = True
+                    monitor_stop.set()
                 break
 
             # Mark first audio bytes received from the network
@@ -982,22 +948,31 @@ def play_stream(
 
             # Write to ffplay stdin
             try:
-                if not first_bytes_written:
-                    _t.mark("first-bytes-to-ffplay")
-                    first_bytes_written = True
                 offset = 0
+                last_progress = time.monotonic()
                 while offset < len(chunk):
                     if device_changed.is_set():
                         exit_code = 3
                         break
                     if proc.poll() is not None:
                         raise BrokenPipeError()
-                    written = proc.stdin.write(chunk[offset:])
+                    try:
+                        written = proc.stdin.write(chunk[offset:])
+                    except BlockingIOError:
+                        written = None
                     if written:
                         offset += written
                         bytes_written += written
+                        last_progress = time.monotonic()
+                        if not first_bytes_written:
+                            _t.mark("first-bytes-to-ffplay")
+                            first_bytes_written = True
+                    elif time.monotonic() - last_progress >= timeout:
+                        print("Playback write stalled.", file=sys.stderr)
+                        exit_code = 1
+                        break
                     else:
-                        monitor_stop.wait(0.05)
+                        monitor_stop.wait(0.01)
                 proc.stdin.flush()
                 # Time spent delivering queued audio is backpressure, not a
                 # period of waiting for server data.
@@ -1008,23 +983,23 @@ def play_stream(
                 # Device change takes priority: if the device change caused
                 # ffplay to be killed (breaking the pipe), report exit 3.
                 if device_changed.is_set():
-                    print(
-                        "AirPods output changed or disconnected mid-playback. Stopping.",
-                        file=sys.stderr,
-                    )
                     exit_code = 3
                 else:
-                    print(
-                        "Playback error: ffplay stdin closed unexpectedly.",
-                        file=sys.stderr,
-                    )
+                    print("Playback error: ffplay stdin closed unexpectedly.", file=sys.stderr)
                     exit_code = 1
                 break
 
     finally:
-        if device_changed.is_set():
-            exit_code = 3
-        monitor_stop.set()
+        with completion_lock:
+            if not completed and device_changed.is_set():
+                exit_code = 3
+            completed = True
+            monitor_stop.set()
+        if exit_code == 3:
+            print("AirPods output changed or disconnected mid-playback. Stopping.",
+                  file=sys.stderr)
+        _stop_ffplay(proc)
+        _close_stdin_safe()
         reader.stop()
         if monitor_thread.ident is not None:
             monitor_thread.join(timeout=3)
@@ -1033,8 +1008,10 @@ def play_stream(
         signal.signal(signal.SIGINT,  prior_sigint)
         signal.signal(signal.SIGTERM, prior_sigterm)
 
-        _stop_ffplay(proc)
-        _close_stdin_safe()
+        if diagnostics.thread.ident is not None:
+            diagnostics.finish()
+        else:
+            proc.stderr.close()
 
         _t.mark("ffplay-done")
         if debug:
@@ -1081,7 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=int,
         default=30,
-        help=("Request/header and body-data inactivity timeout in seconds, "
+        help=("Request/header, body-data inactivity, and independent write-progress timeout in seconds, "
               "must be > 0 (default: 30)"),
     )
     p.add_argument(
@@ -1101,10 +1078,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_ids(voice_id: str, model_id: str) -> None:
-    if not _VOICE_ID_RE.match(voice_id):
-        raise ValueError(
-            f"Invalid voice ID (must match {_VOICE_ID_RE.pattern!r})."
-        )
+    validate_voice_id(voice_id)
     validate_model_id(model_id)
 
 
@@ -1217,21 +1191,6 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 4
 
-    # --- Re-check device immediately before playback ---
-    try:
-        device_name_2 = get_default_output_device_name()
-    except CoreAudioError as exc:
-        print(f"Error re-checking audio output device: {exc}", file=sys.stderr)
-        return 2
-
-    if not is_airpods_device(device_name_2) or device_name_2 != device_name:
-        print(
-            f"Error: AirPods output changed before playback started "
-            f"(was '{device_name}', now '{device_name_2}'). Aborting.",
-            file=sys.stderr,
-        )
-        return 2
-
     # --- Stream TTS ---
     t.mark("request-start")
     try:
@@ -1253,6 +1212,18 @@ def main(argv: Optional[list] = None) -> int:
         del api_key
 
     t.mark("headers-received")
+
+    # Headers can take a long time. Recheck the original selection only now,
+    # before transferring response ownership or starting a player.
+    try:
+        device_name_2 = get_default_output_device_name()
+        if (not isinstance(device_name_2, str) or not is_airpods_device(device_name_2)
+                or device_name_2 != device_name):
+            raise CoreAudioError("Output changed")
+    except Exception:
+        resp.close()
+        print("AirPods output unavailable before playback. Aborting.", file=sys.stderr)
+        return 2
 
     # Playback owns response closure; never close it concurrently with a read.
     return play_stream(

@@ -6,8 +6,10 @@ The implementation uses Python's standard library, SoCo, and the sibling
 `elevenlabs-voice-policy/scripts/elevenlabs_voice.py`. Package both skills at the
 same directory level for copied installations. Whole-skill symlinks resolve
 the policy next to the real checkout; no separate policy symlink is necessary.
-The shared policy owns `DEFAULT_MODEL_ID` (`eleven_v4`) and v3 stability presets,
-not user voice IDs or credential selectors.
+The shared module owns `DEFAULT_MODEL_ID` (`eleven_v4`), v3 stability presets,
+strict ID/payload rules, bounded Keychain lookup, redirect refusal, and MP3 MIME
+validation. Consumer adapters retain their own exit/phase error contracts; the
+module contains no user voice IDs or credential selector defaults.
 
 - `--voice-id` overrides `ELEVENLABS_VOICE_ID`; no bundled voice.
 - `--room` overrides `SONOS_ROOM`; no implicit destination.
@@ -19,7 +21,10 @@ not user voice IDs or credential selectors.
   It validates and describes the request without network, credentials, discovery,
   or speaker access. Its output includes the submitted text, so treat it accordingly.
 - Text, identifiers, volume, timeout, and model/stability combinations are validated
-  before sensitive I/O. Timeout must be finite and positive, including direct calls.
+  before sensitive I/O. Explicit playback and TTS timeouts must be finite and
+  positive, including direct calls. Default playback is calculated after synthesis:
+  `ceil(MP3 bytes / 16000) + 30` seconds for `mp3_44100_128`. Explicit `--timeout`
+  is a hard playback override. Independent `--tts-timeout` defaults to 180 seconds.
 
 For approved setup, configure selectors for an existing user-owned Keychain item:
 
@@ -37,13 +42,15 @@ file. Credential creation or rotation is a separate, user-authorized operation.
 
 1. Validate all configuration; install scoped, cleanup-aware signal handling.
 2. Discover the room by case-insensitive name; reject missing/ambiguous matches.
-3. Freshly inspect topology and reject unsupported announcement targets.
+3. Freshly inspect topology and reject unsafe targets and cloud queue sources
+   on the target or its playback owner, before credentials or synthesis.
 4. Read the selected Keychain item; synthesize the exact text to temporary MP3.
 5. Freshly validate again; arm recovery immediately before unjoin and isolate.
-6. Capture transport state and original volume.
-7. Start the restricted HTTP server, recheck isolation, set volume, and play.
-8. Wait for PLAYING followed by STOPPED within the configured deadline.
-9. Shut down the server; restore captured state, volume, and original grouping.
+6. Capture transport, volume, and mute; reject a source that changed to cloud.
+7. Start the restricted HTTP server and AVTransport recorder; recheck isolation
+   and source, set volume, temporarily unmute, arm the attempt, and play.
+8. Require correlated PLAYING then STOPPED via events or fresh transport polling.
+9. Stop the owned event subscription and server; restore state and exact grouping.
 10. Remove temporary files, restore prior signal handlers, then report outcome.
 
 Synthesis completes before group changes. SoCo uses multicast UPnP discovery;
@@ -69,7 +76,8 @@ provider compatibility; offline tests validate request construction only.
 ## Network security
 
 A private urllib opener refuses redirects before another request, including
-same-origin redirects. Non-success responses are not saved as audio. Errors
+same-origin redirects. Non-200, non-`audio/mpeg`, and empty responses are not
+saved as audio. Raw header/body socket errors are sanitized. Errors
 exclude provider-controlled bodies, reasons, redirect destinations, and keys.
 
 Each HTTP server serves exactly one path containing a new 256-bit random token.
@@ -106,14 +114,19 @@ Offline cache-aware tests do not establish firmware compatibility.
 A grouped member is detached and verified as standalone before snapshot/playback.
 Before unjoining, its identity and original topology are checked again. Immediately
 before playback, its identity and singleton membership are rechecked. Restoration
-requires the original coordinator and exact member set, with bounded convergence
-polling. Concurrent changes fail closed rather than joining a different group.
+accepts an already exact original coordinator/member set without a join RPC.
+Otherwise it joins only from the expected isolated-target/original-group-minus-
+target state. Convergence polls every 0.5 seconds for at most five seconds, always
+invalidating the cache and sleeping no longer than the remaining deadline.
+Concurrent changes fail closed rather than joining a different group.
 Sonos provides no atomic lock against other controllers changing topology during
 playback; the pre-playback check cannot eliminate that race.
 
 Cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring volume.
-An empty saved URI is cleared on the coordinator. Volume and cleared-URI read-back
-errors or mismatches are failures, not successful verification. Cleanup continues
+An empty saved URI is cleared only on idle standalone targets, not detached
+members awaiting regrouping. Mute, volume, source/transport where meaningful,
+and cleared-URI read-back errors or mismatches are failures. Queue source checks
+use `GetMediaInfo.CurrentURI`, not a per-track URI. Cleanup continues
 attempting independent restoration steps after failures. Successful API calls are
 not proof of frame-accurate queue/seek restoration; brief interruption is inherent.
 
@@ -122,6 +135,8 @@ SIGINT/SIGTERM handling is installed before live preflight, including direct
 and temporary-directory exit; prior handlers are restored only after deletion.
 Restoration failure takes precedence over interrupts and playback failures.
 Otherwise deferred interrupts propagate, then the original phase failure.
+One cleanup-aware guard spans the full resource lifetime. Cleanup actions and
+snapshot restoration run once, without interrupt-driven replay.
 A failed pre-unjoin validation incurs no recovery obligation or group RPC;
 a validated unjoin attempt does, even if it mutates the device then times out.
 
@@ -132,12 +147,39 @@ alone does not prove playback started. Unknown/malformed telemetry, read errors,
 pausing, non-start, and timeout produce `SONOS_PLAYBACK_FAILED` after cleanup.
 Deadlines bound polling, not every blocking SoCo or network call.
 
+An attempt-scoped AVTransport subscription starts before Play. A bounded,
+thread-safe queue sink retains ordered states during blocking RPCs, correlated
+to the announcement URI and subscription sequence. Initial, stale, duplicate,
+and unrelated evidence cannot establish start; overflow, sequence loss,
+subscription expiry, and unsupported backends fail closed. Only the default
+threaded SoCo backend is supported. Each attempt owns a callback listener using
+the SDK's SID registry. Cleanup unsubscribes only this attempt, bounds the SDK
+0.31.2 shutdown wake-up request, and closes its socket without stopping another
+caller's listener or subscriptions. No
+ZoneGroupTopology subscription or automatic firewall change is made.
+
+Cloud queues (`x-rincon-queue:…#<nonzero>`) are refused with
+`SONOS_SOURCE_UNSUPPORTED`; SoCo 0.31.2's Snapshot cannot restart them. Checks run
+in read-only preflight, before isolation, after snapshot, and before override.
+If isolation occurred but source replacement did not, cloud refusal regroups
+only: it never invokes cloud Snapshot restore/play.
+
+### Pending live acceptance
+
+Findings 8 and 10 remain hardware-gated: idle standalone empty-URI clearing
+and real short-clip AVTransport delivery need separately approved firmware and
+callback/firewall checks. A rejected clear remains a restoration failure.
+Loopback SDK, dummy-decoder, and mocked speaker evidence do not prove audible
+playback or firmware support. Hold merge readiness unless live checks pass or
+Kyle approves explicit supported-source/short-clip restrictions.
+
 Normal phase failures print `SONOS_SAY_ERROR=<code>` without exception traces:
 
 - `ELEVENLABS_KEY_FAILED`
 - `ELEVENLABS_SYNTHESIS_FAILED`
 - `SONOS_DISCOVERY_FAILED`
 - `SONOS_TOPOLOGY_FAILED`
+- `SONOS_SOURCE_UNSUPPORTED`
 - `SONOS_PLAYBACK_FAILED`
 - `SONOS_RESTORE_FAILED`
 

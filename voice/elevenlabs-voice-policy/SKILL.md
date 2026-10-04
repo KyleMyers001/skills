@@ -1,16 +1,21 @@
 ---
 name: elevenlabs-voice-policy
 description: >-
-  Internal model and stability policy used by airpods-say and sonos-say. Load
+  Internal TTS request and voice policy used by airpods-say and sonos-say. Load
   when maintaining either integration, not when selecting a speech command.
 ---
 
 # ElevenLabs Voice Policy
 
-This dependency supplies the model default, stability presets, and model-ID
-validation in `scripts/elevenlabs_voice.py`. It contains no voice identifier or
-credential defaults. Both `airpods-say` and `sonos-say` obtain user settings
-outside this dependency.
+This dependency supplies model/stability policy, strict voice/model validation,
+exact-text payload construction, bounded sanitized Keychain lookup, a private
+redirect-rejecting opener, and `audio/mpeg` header validation in
+`scripts/elevenlabs_voice.py`. It contains no voice identifier or credential
+defaults. IDs are type-checked and full-matched without stripping whitespace.
+Both `airpods-say` and `sonos-say` obtain user settings
+outside this dependency. Consumers retain stream/file reading, playback,
+timeout selection, device/topology logic, and their own error adapters. Shared
+rules must not collapse AirPods exits 4/5 into Sonos's phase markers.
 
 For copied installations, deploy this directory as a sibling of each consumer.
 Whole-consumer symlinks resolve this dependency beside their real checkout;

@@ -43,6 +43,7 @@ class ConfiguredTestCase(unittest.TestCase):
                             has_satellites=False)
         speaker.zone_group_state.has_subscriptions = False
         speaker.group = SimpleNamespace(coordinator=speaker, members=[speaker])
+        speaker.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
         discovery = patch("sonos_say.discover_speaker", return_value=speaker)
         routing = patch("sonos_say.local_ip_toward", return_value="192.0.2.1")
         discovery.start()
@@ -190,7 +191,7 @@ class TestVoiceConfiguration(ConfiguredTestCase):
         )
         for error in errors:
             with self.subTest(error=type(error).__name__):
-                with patch("sonos_say.subprocess.run",
+                with patch("elevenlabs_voice.subprocess.run",
                            side_effect=error if isinstance(error, Exception) else None,
                            return_value=error), \
                         patch("sys.stderr", io.StringIO()) as stderr:
@@ -207,6 +208,31 @@ class TestVoiceConfiguration(ConfiguredTestCase):
             ):
                 sonos_say.announce("Hello", **override)
             key.assert_not_called()
+
+    def test_strict_identifiers_and_tts_timeout_fail_before_discovery(self):
+        for value in ('eleven_v3\n', 'v\r\n', 'v\nv', ' v', 'v ', '', 'v'*65):
+            for option in ('--voice-id', '--model'):
+                with self.subTest(value=value, option=option), \
+                        patch('sonos_say.discover_speaker') as discover, \
+                        patch('sonos_say.get_api_key') as key, \
+                        patch('sys.stderr', io.StringIO()):
+                    self.assertEqual(sonos_say.main(['Hello', option, value]), 1)
+                discover.assert_not_called(); key.assert_not_called()
+        for value in (None, 1, []):
+            for label in ('voice-id', 'model'):
+                with self.subTest(value=value, label=label), self.assertRaises(ValueError):
+                    sonos_say._validate_elevenlabs_id(value, label)
+        for value in ('nan', 'inf', '-inf', '0', '-1'):
+            with patch('sonos_say.discover_speaker') as discover, \
+                    patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit):
+                sonos_say.main(['Hello', '--tts-timeout='+value])
+            discover.assert_not_called()
+            with self.assertRaises(ValueError):
+                sonos_say.announce('Hello', tts_timeout=float(value), dry_run=True)
+        with patch.dict(os.environ, {'ELEVENLABS_VOICE_ID': 'voice\n'}), \
+                patch('sonos_say.discover_speaker') as discover, patch('sys.stderr', io.StringIO()):
+            self.assertEqual(sonos_say.main(['Hello']), 1)
+            discover.assert_not_called()
 
     def test_nonfinite_or_nonpositive_timeout_fails_before_io(self):
         for value in ("nan", "inf", "-inf", "0", "-1"):
@@ -230,10 +256,12 @@ class TestVoiceConfiguration(ConfiguredTestCase):
 class TestVoicePayload(ConfiguredTestCase):
     def _payload(self, model, stability, text="Hello"):
         response = MagicMock()
-        response.__enter__.return_value.read.return_value = b"mp3"
-        response.__enter__.return_value.status = 200
+        response.__enter__.return_value = response
+        response.read.return_value = b"mp3"
+        response.status = 200
+        response.headers.get.return_value = "audio/mpeg"
 
-        with patch("sonos_say._tts_opener") as opener:
+        with patch("elevenlabs_voice.tts_opener") as opener:
             open_url = opener.return_value.open
             open_url.return_value = response
             sonos_say.synthesise_mp3(
@@ -288,7 +316,7 @@ class TestVoicePayload(ConfiguredTestCase):
             body,
         )
 
-        with patch("sonos_say._tts_opener") as opener:
+        with patch("elevenlabs_voice.tts_opener") as opener:
             opener.return_value.open.side_effect = error
             with self.assertRaises(RuntimeError) as raised:
                 sonos_say.synthesise_mp3(
@@ -387,6 +415,7 @@ class TestRedirectRejection(ConfiguredTestCase):
             def do_POST(self):
                 self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
                 self.send_header("Content-Length", "8")
                 self.end_headers()
                 self.wfile.write(b"test-mp3")
@@ -406,7 +435,7 @@ class TestRedirectRejection(ConfiguredTestCase):
             io.BytesIO(b"private-body"),
         )
         with (
-            patch("sonos_say._tts_opener") as opener,
+            patch("elevenlabs_voice.tts_opener") as opener,
             patch("sonos_say.get_api_key", return_value="dummy-api-key"),
             patch("sys.stderr", io.StringIO()) as stderr,
             patch("sonos_say.log") as logger,

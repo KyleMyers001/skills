@@ -23,13 +23,29 @@ import sonos_say as say
 phase, signame, root, failure = sys.argv[1:]
 signum = getattr(signal, signame)
 previous = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
-mutations, paths, resources = [], [], []
+mutations, paths, resources, restore_calls = [], [], [], []
+restoring = False
+mute_state, volume_state = [True], [30]
 target, coord = MagicMock(), MagicMock()
 for uid, sp in (("target", target), ("coord", coord)):
     sp.uid, sp.is_visible = uid, True
     sp.is_satellite, sp.has_satellites = False, False
     sp.zone_group_state.has_subscriptions = False
-    sp.volume, sp.ip_address = 30, "192.0.2.2"
+    sp.volume, sp.ip_address, sp.mute = 30, "192.0.2.2", False
+    sp.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
+
+def set_mute(value):
+    if restoring:
+        interrupt("mute-restoration")
+    mute_state[0] = value
+
+def set_volume(value):
+    if restoring:
+        interrupt("volume-restoration")
+    volume_state[0] = value
+
+type(target).mute = property(lambda self: mute_state[0], lambda self, v: set_mute(v))
+type(target).volume = property(lambda self: volume_state[0], lambda self, v: set_volume(v))
 
 def group(coordinator, members):
     view = types.SimpleNamespace(coordinator=coordinator, members=members)
@@ -61,12 +77,13 @@ def unjoin():
     group(target, [target])
 
 def join(prior):
+    interrupt("regrouping")
     mutations.append("rejoin")
     group(prior, [prior, target])
 
 target.unjoin.side_effect, target.join.side_effect = unjoin, join
 
-def playback(*args):
+def playback(*args, **kwargs):
     interrupt("playback")
     return True
 
@@ -75,8 +92,17 @@ def server_exit(*args):
     resources.append("server-closed")
     return False
 
+def event_exit():
+    interrupt("event-exit")
+    resources.append("event-closed")
+
 def restoration(**kwargs):
+    global restoring
+    restore_calls.append(True)
+    restoring = True
     interrupt("restoration")
+    target.mute = True
+    target.volume = 30
     if failure == "yes":
         raise RuntimeError("restore failed")
 
@@ -97,11 +123,14 @@ with patch("sonos_say.discover_speaker", discover), \
      patch("sonos_say.synthesise_mp3", synthesis), \
      patch("sonos_say.wait_for_playback", playback), \
      patch("sonos_say.tempfile.TemporaryDirectory", Temporary), \
+     patch("sonos_say._TransportEvents") as event_type, \
      patch("sonos_say.serve_file") as serve, \
      patch("sonos_say.Snapshot") as snapshot:
     serve.return_value.__enter__.return_value = "http://192.0.2.1/audio"
     serve.return_value.__exit__.side_effect = server_exit
     snapshot.return_value.media_uri = "prior-uri"
+    snapshot.return_value.mute = True
+    event_type.return_value.close.side_effect = event_exit
     snapshot.return_value.restore.side_effect = restoration
     try:
         say.announce("Hello")
@@ -113,6 +142,8 @@ with patch("sonos_say.discover_speaker", discover), \
         outcome = exc.code
 print(json.dumps({"outcome": outcome, "mutations": mutations,
                   "paths": paths, "resources": resources,
+                  "restore_calls": len(restore_calls), "mute": target.mute,
+                  "volume": target.volume,
                   "files": list(Path(root).rglob("*")),
                   "handlers_restored": all(signal.getsignal(s) == h
                                            for s, h in previous.items())},
@@ -139,11 +170,14 @@ class TestScopedLifecycleSignals(unittest.TestCase):
             evidence = json.loads(result.stdout)
             self.assertEqual(evidence["files"], [])
             self.assertTrue(evidence["handlers_restored"])
+            self.assertTrue(evidence["mute"])
+            self.assertEqual(evidence["volume"], 30)
         return evidence
 
     def test_signals_across_live_resource_lifetime(self):
         for phase in ("discovery", "validation", "synthesis", "playback",
-                      "server-exit", "restoration", "temporary-exit"):
+                      "event-exit", "server-exit", "restoration", "mute-restoration",
+                      "volume-restoration", "regrouping", "temporary-exit"):
             for signame, outcome in (("SIGINT", 130), ("SIGTERM", 143)):
                 with self.subTest(phase=phase, signal=signame):
                     result = self.run_child(phase, signame)
@@ -153,9 +187,10 @@ class TestScopedLifecycleSignals(unittest.TestCase):
                         ["detach", "rejoin"])
                     if phase == "synthesis":
                         self.assertEqual(len(result["paths"]), 1)
-                    if phase in ("playback", "server-exit", "restoration",
-                                 "temporary-exit"):
-                        self.assertEqual(result["resources"], ["server-closed"])
+                    early = phase in ("discovery", "validation", "synthesis")
+                    self.assertEqual(result["restore_calls"], 0 if early else 1)
+                    if not early:
+                        self.assertEqual(result["resources"], ["event-closed", "server-closed"])
 
     def test_restoration_failure_wins_even_over_temporary_exit_signal(self):
         for signame in ("SIGINT", "SIGTERM"):

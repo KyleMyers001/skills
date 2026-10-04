@@ -57,6 +57,8 @@ configuration outside the skill package.
 
 - The current default output device name must contain "AirPods". Otherwise,
   the helper exits before Keychain access or synthesis.
+- After TTS headers arrive, it rechecks the original device before starting a
+  player. A successful first monitor sample gates every audio write.
 - It never switches outputs automatically. It polls the output during playback
   and requests a stop when a change or disconnection is detected. These checks
   are not device-bound routing or an instantaneous-stop guarantee.
@@ -108,12 +110,16 @@ promise of consistent performance. Test unfamiliar tags; do not automatically
 decorate ordinary speech. Accent results vary, and prior `[sings]` experiments
 remained spoken rather than melodic.
 
-`--timeout SEC` sets a positive request/header and body-data inactivity timeout
-(default: 30 seconds), not a deadline for the whole speech. Blocking decoded
-`HTTPResponse.read1()` feeds a bounded queue; healthy progress and player
-backpressure do not exhaust that deadline. Redirects are refused, and MP3 format
-is selected in the request query. After network EOF, success requires ffplay
-exit 0 within the existing duration-aware drain limit (30–600 seconds).
+`--timeout SEC` sets positive request/header and body-data inactivity budgets
+(default: 30 seconds), plus an independent player write-progress budget. Actual
+partial writes reset the latter; backpressure is not a network timeout, but a
+player that makes no progress fails with exit 1. This is not a whole-speech limit.
+Blocking decoded `HTTPResponse.read1()` feeds a bounded queue. Redirects are
+refused; MP3 format is selected in the query and `audio/mpeg` headers are required.
+Empty audio fails with exit 5. After EOF, success requires ffplay exit 0 within
+the duration-aware drain limit (30–600 seconds), no error-level decoder/player
+diagnostics, and diagnostic draining before accepting completion. Raw decoder
+stderr is never printed, even in debug mode.
 
 `--debug` enables timing and device diagnostics without printing the key,
 Keychain selector values, or provider error details.
@@ -121,11 +127,12 @@ Keychain selector values, or provider error details.
 ## Exit handling
 
 - **0:** helper reports completion, or dry-run succeeded.
-- **1:** missing/invalid configuration, invalid input, or a general failure.
+- **1:** invalid configuration/input, player stall, decoder error, or general failure.
 - **2:** AirPods not active or output changed before playback; remain text-only.
 - **3:** output changed/disconnected during playback; do not retry automatically.
 - **4:** Keychain credential lookup failed.
-- **5:** ElevenLabs request/header/body-network failure or inactivity timeout.
+- **5:** request/header/body-network failure, unsupported/empty audio, or
+  inactivity timeout.
 - **6:** `ffplay` missing.
 
 Report failures concisely in text. Never expose credentials or provider response

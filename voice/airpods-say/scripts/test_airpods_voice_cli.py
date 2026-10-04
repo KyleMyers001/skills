@@ -56,6 +56,16 @@ class TestVoiceCli(unittest.TestCase):
         self.tts.assert_not_called()
         self.player.assert_not_called()
 
+    def test_post_header_detection_error_closes_response_without_player(self):
+        self.configure()
+        for failure in (airpods_say.CoreAudioError('unavailable'), OSError('unavailable'), None):
+            with self.subTest(failure=failure):
+                self.tts.return_value.close.reset_mock()
+                self.device.side_effect = ['Test AirPods', failure]
+                self.assertEqual(airpods_say.main(['Hello']), 2)
+                self.tts.return_value.close.assert_called_once()
+                self.player.assert_not_called()
+
     def test_timeout_reaches_request_and_playback(self):
         self.configure()
         self.assertEqual(airpods_say.main(["--timeout", "7", "Hello"]), 0)
@@ -71,7 +81,7 @@ class TestVoiceCli(unittest.TestCase):
                 self.stderr.seek(0)
                 self.stderr.truncate()
                 # Exercise the real normalizer rather than mocking its result.
-                with patch("airpods_say._tts_opener", create=True) as opener, \
+                with patch("elevenlabs_voice.tts_opener", create=True) as opener, \
                         patch("urllib.request.urlopen", side_effect=error):
                     opener.return_value.open.side_effect = error
                     self.tts.side_effect = _REAL_TTS
@@ -90,7 +100,7 @@ class TestVoiceCli(unittest.TestCase):
             with self.subTest(debug=debug):
                 self.stderr.seek(0)
                 self.stderr.truncate()
-                with patch("airpods_say.subprocess.run", return_value=MagicMock(
+                with patch("elevenlabs_voice.subprocess.run", return_value=MagicMock(
                         returncode=44, stdout="dummy-key", stderr="private-stderr")):
                     self.assertEqual(airpods_say.main(["Hello"] + debug), 4)
                 for value in ("service@example.invalid", "account@example.invalid",
@@ -130,6 +140,27 @@ class TestVoiceCli(unittest.TestCase):
 
         self.assertEqual(args.model, "eleven_flash_v2_5")
         self.assertEqual(args.voice_id, "AnotherVoice")
+
+    def test_invalid_identifiers_never_reach_device_or_sensitive_io(self):
+        for value in ('eleven_v3\n', 'a\r\n', 'a\nb', ' a', '', 'a' * 65):
+            for option in ('--voice-id', '--model'):
+                with self.subTest(value=value, option=option):
+                    self.configure()
+                    self.assertEqual(airpods_say.main([option, value, 'Hello']), 1)
+        self.device.assert_not_called()
+        self.find_ffplay.assert_not_called()
+        self.assert_no_sensitive_io()
+        for value in (None, 1, []):
+            for args in ((value, 'eleven_v4'), ('voice', value)):
+                with self.subTest(args=args), self.assertRaises(ValueError):
+                    airpods_say.validate_ids(*args)
+        airpods_say.validate_ids('v' * 64, 'm' * 64)
+
+    def test_newline_environment_voice_is_not_stripped(self):
+        self.configure()
+        os.environ['ELEVENLABS_VOICE_ID'] = 'test-voice\n'
+        self.assertEqual(airpods_say.main(['Hello']), 1)
+        self.assert_no_sensitive_io()
 
     def test_model_validation_accepts_dots(self):
         airpods_say.validate_ids("test-voice", "eleven.v3-preview_1")
@@ -272,6 +303,27 @@ class TestVoiceCli(unittest.TestCase):
 
 
 class TestSymlinkInstallation(unittest.TestCase):
+    def test_copied_consumers_with_sibling_policy_keep_entry_points(self):
+        import shutil
+        voice_dir = Path(airpods_say.__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stub = root / 'soco'; stub.mkdir()
+            (stub / '__init__.py').write_text('class SoCo: pass\n')
+            (stub / 'snapshot.py').write_text('class Snapshot: pass\n')
+            installed = root / 'installed'
+            for skill in ('airpods-say', 'sonos-say', 'elevenlabs-voice-policy'):
+                shutil.copytree(voice_dir / skill, installed / skill,
+                                ignore=shutil.ignore_patterns('__pycache__'))
+            for skill, script in (('airpods-say', 'airpods_say.py'), ('sonos-say', 'sonos_say.py')):
+                with self.subTest(skill=skill):
+                    result = subprocess.run([sys.executable,
+                        str(installed / skill / 'scripts' / script), '--help'],
+                        cwd=root, env={'PATH':os.defpath, 'PYTHONPATH':str(root)},
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('--voice-id', result.stdout)
+
     def test_both_consumers_find_checkout_policy_from_a_lone_skill_symlink(self):
         voice_dir = Path(airpods_say.__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmp:

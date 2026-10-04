@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Optional
 
 
-TOPOLOGY_POLL_SECONDS = 0.1
+TOPOLOGY_POLL_SECONDS = 0.5
 TOPOLOGY_VERIFY_TIMEOUT = 5.0
 
 
@@ -135,7 +135,7 @@ def _wait_for_topology(
             raise TopologyError(
                 "exact group topology did not converge"
             ) from last_error
-        time.sleep(TOPOLOGY_POLL_SECONDS)
+        time.sleep(min(TOPOLOGY_POLL_SECONDS, max(0, deadline - time.monotonic())))
 
 
 def detach_target(
@@ -180,13 +180,34 @@ def restore_target_group(
     if not plan.detach:
         return
     expected_without_target = plan.member_uids - {plan.speaker_uid}
-    try:
-        _wait_for_topology(
-            plan.coordinator,
-            plan.coordinator_uid,
-            expected_without_target,
-            timeout,
+    deadline = time.monotonic() + timeout
+    while True:
+        target = inspect_topology(plan.speaker)
+        coordinator = inspect_topology(plan.coordinator)
+        original = (
+            target.coordinator_uid == coordinator.coordinator_uid == plan.coordinator_uid
+            and target.member_uids == coordinator.member_uids == plan.member_uids
         )
+        if original:
+            return  # RPC may have failed before mutation, or rejoin already completed.
+        detached = (
+            target.coordinator_uid == plan.speaker_uid
+            and target.member_uids == frozenset({plan.speaker_uid})
+            and coordinator.coordinator_uid == plan.coordinator_uid
+            and coordinator.member_uids == expected_without_target
+        )
+        if detached:
+            break
+        if (target.coordinator_uid not in (plan.speaker_uid, plan.coordinator_uid)
+                or coordinator.coordinator_uid != plan.coordinator_uid
+                or not target.member_uids <= plan.member_uids
+                or not coordinator.member_uids <= plan.member_uids):
+            raise TopologyError("unrelated topology cannot be restored safely")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TopologyError("recovery topology did not converge")
+        time.sleep(min(TOPOLOGY_POLL_SECONDS, remaining))
+    try:
         plan.speaker.join(plan.coordinator)
     except Exception as exc:
         raise TopologyError("target could not rejoin its prior group") from exc

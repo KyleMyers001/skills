@@ -21,16 +21,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from collections import deque
 import http.server
+import http.client
 import ipaddress
 import logging
 import math
 import os
-import re
 import secrets
 import signal
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -49,12 +49,14 @@ _POLICY_DIR = (
 if str(_POLICY_DIR) not in sys.path:
     sys.path.insert(0, str(_POLICY_DIR))
 
+import elevenlabs_voice as voice_policy  # noqa: E402
 from elevenlabs_voice import (  # noqa: E402
     DEFAULT_MODEL_ID,
     STABILITY_PRESETS,
     StabilityPreset,
     resolve_stability,
     validate_model_id,
+    validate_voice_id,
 )
 from sonos_topology import (  # noqa: E402
     TopologyError,
@@ -82,7 +84,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 DEFAULT_VOLUME = 35
 DEFAULT_MODEL = DEFAULT_MODEL_ID
-DEFAULT_TIMEOUT = 120          # seconds to wait for playback to complete
+DEFAULT_TIMEOUT = None        # automatic MP3-size-derived playback budget
+DEFAULT_TTS_TIMEOUT = 180      # independent request/header/body timeout
 MAX_TEXT_CHARS = 5_000         # implementation limit; keep speech short
 # Maximum seconds to wait for transport to enter PLAYING before
 # accepting that playback never started (avoids restoring too early on a slow
@@ -90,10 +93,6 @@ MAX_TEXT_CHARS = 5_000         # implementation limit; keep speech short
 PLAYBACK_START_TIMEOUT = 8.0
 ELEVENLABS_TTS_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
 OUTPUT_FORMAT = "mp3_44100_128"
-
-# Strict allowlist for ElevenLabs voice identifiers.
-# Letters, digits, underscores, and hyphens; 1-64 characters.
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 log = logging.getLogger("sonos_say")
 
@@ -104,6 +103,7 @@ ERROR_CODES = frozenset({
     "SONOS_PLAYBACK_FAILED",
     "SONOS_RESTORE_FAILED",
     "SONOS_TOPOLOGY_FAILED",
+    "SONOS_SOURCE_UNSUPPORTED",
 })
 
 
@@ -132,13 +132,7 @@ def _validate_elevenlabs_id(value: str, label: str) -> str:
     """
     if label == "model":
         return validate_model_id(value)
-    if not isinstance(value, str) or not _ID_RE.fullmatch(value):
-        raise ValueError(
-            f"Invalid {label}. "
-            "Must contain only letters, digits, underscores, or hyphens "
-            "and be 1–64 characters long."
-        )
-    return value
+    return validate_voice_id(value)
 
 
 # ---------------------------------------------------------------------------
@@ -148,34 +142,14 @@ def _validate_elevenlabs_id(value: str, label: str) -> str:
 def get_api_key(service: str, account: str) -> str:
     """Retrieve ElevenLabs API key from macOS Keychain. Never prints the value."""
     try:
-        result = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        )
-        key = result.stdout.strip()
-        if not key:
-            raise RuntimeError("Keychain returned empty value")
-        return key
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return voice_policy.keychain_password(service, account)
+    except voice_policy.KeychainLookupError:
         raise RuntimeError("Could not retrieve API key from Keychain") from None
 
 
 # ---------------------------------------------------------------------------
 # ElevenLabs TTS
 # ---------------------------------------------------------------------------
-
-class _RejectRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", {}, fp)
-
-
-def _tts_opener():
-    """Use a private opener so credentials never follow a redirect."""
-    return urllib.request.build_opener(_RejectRedirects())
-
 
 def synthesise_mp3(
     text: str,
@@ -185,6 +159,7 @@ def synthesise_mp3(
     dest_path: Path,
     output_format: str = OUTPUT_FORMAT,
     stability: Optional[StabilityPreset] = None,
+    timeout: float = DEFAULT_TTS_TIMEOUT,
 ) -> None:
     """
     Call ElevenLabs REST API and write the MP3 to *dest_path*.
@@ -193,40 +168,16 @@ def synthesise_mp3(
     *model* is validated but only used in the JSON body (no URL insertion).
     The API key is never logged.
     """
-    import json as _json
-
-    # URL-encode voice_id for safe path insertion; model goes into JSON only.
-    encoded_voice_id = urllib.parse.quote(voice_id, safe="")
-    url = (
-        f"{ELEVENLABS_TTS_BASE}/{encoded_voice_id}"
-        f"?output_format={urllib.parse.quote(output_format, safe='')}"
-    )
-    payload_data = {"text": text, "model_id": model}
-    if stability is not None:
-        payload_data["voice_settings"] = {
-            "stability": stability.value,
-        }
-    payload = _json.dumps(payload_data).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "xi-api-key": api_key,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        },
-        method="POST",
-    )
+    _validate_timeout(timeout)
+    validate_voice_id(voice_id)
+    endpoint = f"{ELEVENLABS_TTS_BASE}/{urllib.parse.quote(voice_id, safe='')}"
     try:
-        with _tts_opener().open(req, timeout=30) as resp:
-            if resp.status != 200:
-                raise RuntimeError("ElevenLabs request failed")
+        with voice_policy.open_tts(endpoint, api_key, text, model,
+                                   output_format, timeout, stability) as resp:
             data = resp.read()
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        raise RuntimeError("ElevenLabs request failed") from None
-    except urllib.error.URLError:
+            if not data:
+                raise voice_policy.TTSRequestError()
+    except (voice_policy.TTSRequestError, OSError, http.client.HTTPException):
         raise RuntimeError("ElevenLabs request failed") from None
 
     dest_path.write_bytes(data)
@@ -416,10 +367,218 @@ def serve_file(file_path: Path, bind_ip: str, allowed_client_ip: str):
 # Sonos playback helpers
 # ---------------------------------------------------------------------------
 
+def _check_source_uri(uri) -> None:
+    if not isinstance(uri, str):
+        raise SonosSayError("SONOS_SOURCE_UNSUPPORTED")
+    if uri.startswith("x-rincon-queue:") and uri.rsplit("#", 1)[-1] != "0":
+        raise SonosSayError("SONOS_SOURCE_UNSUPPORTED")
+
+
+def _check_supported_sources(topology, isolated=False) -> None:
+    owners = [topology.speaker]
+    if not isolated and topology.coordinator is not topology.speaker:
+        owners.append(topology.coordinator)
+    for owner in owners:
+        try:
+            uri = owner.avTransport.GetMediaInfo([("InstanceID", 0)])["CurrentURI"]
+        except Exception:
+            raise SonosSayError("SONOS_SOURCE_UNSUPPORTED") from None
+        _check_source_uri(uri)
+
+
+def _threaded_events_backend():
+    from soco import config, events
+    if config.EVENTS_MODULE is not events:
+        raise RuntimeError("Only the threaded SoCo event backend is supported")
+    return events
+
+
+class _TransportEventQueue:
+    """Bounded SDK queue sink; retain short clips during blocking Play RPCs."""
+
+    def __init__(self, uri):
+        self.uri = uri
+        self.lock = threading.Lock()
+        self.pending = deque()
+        self.started = None
+        self.wall_started = None
+        self.sid = None
+        self.last_seq = None
+        self.matching_uri = False
+        self.failed = False
+        self.playing = False
+        self.finished = False
+        self.closed = False
+        self.active = lambda: True
+
+    def arm(self, sid):
+        with self.lock:
+            self.pending.clear()
+            self.started = time.monotonic()
+            self.wall_started = time.time()
+            self.sid = sid
+            self.matching_uri = False
+
+    def put(self, event, *args, **kwargs):
+        # SoCo's send_event calls put() from NOTIFY handler threads. Never
+        # block those threads on a full queue, and never retain raw metadata.
+        with self.lock:
+            if self.closed:
+                return
+            try:
+                seq = int(event.seq)
+                if not 0 <= seq <= 0xffffffff:
+                    raise ValueError("Invalid sequence")
+                if self.started is None:
+                    self.last_seq = seq
+                    return
+                if (not isinstance(event.timestamp, (int, float))
+                        or not math.isfinite(event.timestamp)):
+                    raise ValueError("Invalid event time")
+                if event.sid != self.sid or event.timestamp < self.wall_started:
+                    return
+                if self.last_seq is not None:
+                    expected = 1 if self.last_seq == 0xffffffff else self.last_seq + 1
+                    if seq != expected:
+                        if seq == self.last_seq or seq < self.last_seq:
+                            return
+                        self.failed = True
+                elif seq not in (0, 1):
+                    self.failed = True
+                self.last_seq = seq
+                if seq == 0:  # subscription's initial/prior-source sample
+                    return
+                values = event.variables
+                uri = values.get("av_transport_uri", values.get("current_track_uri"))
+                if uri is not None:
+                    self.matching_uri = uri == self.uri
+                state = values.get("transport_state")
+                if state is None:
+                    return
+                if state not in ("PLAYING", "STOPPED", "TRANSITIONING", "PAUSED_PLAYBACK"):
+                    self.failed = True
+                    return
+                if len(self.pending) >= 64:
+                    self.failed = True
+                    return
+                self.pending.append((time.monotonic(), state, self.matching_uri))
+            except Exception:
+                self.failed = True
+
+    def observe(self, start_timeout, timeout):
+        with self.lock:
+            if self.started is None or not self.active():
+                self.failed = True
+                return False, False
+            while self.pending:
+                when, state, matching = self.pending.popleft()
+                if not matching:
+                    continue
+                if when >= self.started + timeout:
+                    self.failed = True
+                if state == "PLAYING":
+                    if not self.playing and when >= self.started + start_timeout:
+                        self.failed = True
+                    self.playing = True
+                elif state == "STOPPED":
+                    if self.playing:
+                        self.finished = True
+                elif state != "TRANSITIONING":
+                    self.failed = True
+            return self.playing, self.finished
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.pending.clear()
+
+
+class _TransportEvents:
+    """Own only this AVTransport subscription, never somebody else's listener."""
+
+    def __init__(self, speaker, uri):
+        self.speaker = speaker
+        self.queue = _TransportEventQueue(uri)
+        self.subscription = None
+        self.backend = None
+        self.listener = None
+        self.closed = False
+
+    def start(self):
+        self.backend = _threaded_events_backend()
+
+        class OwnedListener(self.backend.EventListener):
+            def stop_listening(self, address):
+                thread = self._listener_thread
+                thread.stop()
+                # SDK 0.31.2's unbounded dummy GET can hang if the listener
+                # exits before accepting it. Bound the wake-up and close the
+                # socket; this listener belongs solely to our subscription.
+                try:
+                    with urllib.request.urlopen(
+                            f"http://{address[0]}:{address[1]}/", timeout=1):
+                        pass
+                except urllib.error.HTTPError as exc:
+                    exc.close()
+                except (OSError, urllib.error.URLError):
+                    pass
+                finally:
+                    thread.join(timeout=3)
+                    thread.server.server_close()
+                if thread.is_alive():
+                    raise RuntimeError("Event listener did not stop")
+
+        self.listener = OwnedListener()
+        self.subscription = self.backend.Subscription(
+            self.speaker.avTransport, event_queue=self.queue)
+        # SDK NOTIFY handlers use the shared SID registry, but each subscription
+        # may own a separate listener. No global listener or backend is replaced.
+        self.subscription.event_listener = self.listener
+        self.subscription.subscribe(requested_timeout=86400, auto_renew=False)
+        self.queue.active = lambda: (self.subscription.is_subscribed is True
+                                     and self.subscription.time_left > 0)
+
+    def arm(self):
+        self.queue.arm(self.subscription.sid)
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.queue.close()
+        if self.subscription is None:
+            return
+        try:
+            self.subscription.unsubscribe()
+        finally:
+            # The SDK stops a listener only when the global SID registry is
+            # empty. Our private listener must also stop while others remain,
+            # or when BaseException bypassed SDK subscription cancellation.
+            self.listener.stop()
+            thread = self.listener._listener_thread
+            if thread is not None and thread.server.fileno() != -1:
+                if thread.is_alive():  # interruption during listener startup
+                    self.listener.stop_listening(thread.server.server_address)
+                else:
+                    thread.server.server_close()
+
+    def __enter__(self):
+        try:
+            self.start()
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 def wait_for_playback(
     speaker: soco.SoCo,
     timeout: float,
     start_timeout: float = PLAYBACK_START_TIMEOUT,
+    events: Optional[_TransportEventQueue] = None,
 ) -> bool:
     """
     Require observed PLAYING followed by STOPPED within finite deadlines.
@@ -437,9 +596,48 @@ def wait_for_playback(
         except Exception:
             return None
 
-    overall_deadline = time.monotonic() + timeout
-    start_deadline = min(time.monotonic() + start_timeout, overall_deadline)
+    started = events.started if events is not None else time.monotonic()
+    overall_deadline = started + timeout
+    start_deadline = min(started + start_timeout, overall_deadline)
     seen_playing = False
+    if events is not None:
+        while time.monotonic() < overall_deadline:
+            observed, finished = events.observe(start_timeout, timeout)
+            if events.failed:
+                return False
+            seen_playing = seen_playing or observed
+            if finished:
+                return time.monotonic() < overall_deadline
+            state = _get_state()
+            if time.monotonic() >= overall_deadline:
+                return False
+            if state not in ("PLAYING", "STOPPED", "TRANSITIONING"):
+                return False
+            # SOAP samples must also be tied to this attempt's URI. STOPPED
+            # before a correlated start never proves delivery.
+            if state == "PLAYING":
+                if not seen_playing and time.monotonic() >= start_deadline:
+                    return False
+                try:
+                    uri = speaker.avTransport.GetMediaInfo([("InstanceID", 0)])["CurrentURI"]
+                except Exception:
+                    return False
+                observed_at = time.monotonic()
+                if (uri != events.uri or observed_at >= overall_deadline
+                        or (not seen_playing and observed_at >= start_deadline)):
+                    return False
+                seen_playing = True
+            elif state == "STOPPED" and seen_playing:
+                try:
+                    uri = speaker.avTransport.GetMediaInfo([("InstanceID", 0)])["CurrentURI"]
+                except Exception:
+                    return False
+                return uri == events.uri and time.monotonic() < overall_deadline
+            if not seen_playing and time.monotonic() >= start_deadline:
+                return False
+            deadline = overall_deadline if seen_playing else start_deadline
+            time.sleep(max(0, min(0.25, deadline - time.monotonic())))
+        return False
     while time.monotonic() < start_deadline:
         state = _get_state()
         if state == "PLAYING":
@@ -462,33 +660,6 @@ def wait_for_playback(
             return False
         time.sleep(max(0, min(0.5, overall_deadline - time.monotonic())))
     return False
-
-
-@contextlib.contextmanager
-def _defer_cleanup_signals():
-    """Record SIGINT/SIGTERM instead of interrupting restoration."""
-    deferred: list[BaseException] = []
-    handled = [signal.SIGINT]
-    if hasattr(signal, "SIGTERM"):
-        handled.append(signal.SIGTERM)
-    previous = {
-        signum: signal.getsignal(signum)
-        for signum in handled
-    }
-
-    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        if signum == signal.SIGINT:
-            deferred.append(KeyboardInterrupt())
-        else:
-            deferred.append(SystemExit(143))
-
-    for signum in handled:
-        signal.signal(signum, _handler)
-    try:
-        yield deferred
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
 
 
 class _MutationSignalGuard:
@@ -541,19 +712,15 @@ def _run_cleanup_step(
     interrupts: list[BaseException],
     warning: str,
 ) -> bool:
-    """Run one cleanup action, retrying once after an interrupt."""
-    for attempt in range(2):
-        try:
-            action()
-            return True
-        except (KeyboardInterrupt, SystemExit) as exc:
-            interrupts.append(exc)
-            if attempt == 0:
-                continue
-        except Exception:
-            pass
-        log.warning(warning)
-        return False
+    """Run each action once; the lifetime signal guard defers real signals."""
+    try:
+        action()
+        return True
+    except (KeyboardInterrupt, SystemExit) as exc:
+        interrupts.append(exc)
+    except Exception:
+        pass
+    log.warning(warning)
     return False
 
 
@@ -588,83 +755,101 @@ def _restore_after_announcement(
     topology,
     topology_mutated: bool,
 ) -> tuple[bool, Optional[BaseException]]:
-    """Attempt every state and topology restoration under deferred SIGTERM."""
+    """Attempt every restoration once under the caller's cleanup signal guard."""
     interrupts: list[BaseException] = []
     restore_failed = False
     uri_cleared = False
 
-    with _defer_cleanup_signals() as deferred:
-        if snapshot_taken and snapshot is not None:
-            restored = _run_cleanup_step(
-                lambda: snapshot.restore(fade=False),
+    if snapshot_taken and snapshot is not None:
+        restored = _run_cleanup_step(
+            lambda: snapshot.restore(fade=False),
+            interrupts,
+            "Could not restore transport state",
+        )
+        restore_failed = restore_failed or not restored
+
+        saved_uri = getattr(snapshot, "media_uri", None) or ""
+        try:
+            should_clear = False
+            if not saved_uri and not topology_mutated:
+                coordinator = speaker.is_coordinator
+                if not isinstance(coordinator, bool):
+                    raise RuntimeError("Coordinator state is unavailable")
+                should_clear = coordinator
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interrupts.append(exc)
+            restore_failed = True
+            should_clear = False
+        except Exception:
+            restore_failed = True
+            should_clear = False
+        if should_clear:
+            uri_cleared = _run_cleanup_step(
+                lambda: _clear_temporary_uri(speaker),
                 interrupts,
-                "Could not restore transport state",
+                "Could not clear temporary AV transport URI",
             )
-            restore_failed = restore_failed or not restored
+            restore_failed = restore_failed or not uri_cleared
 
-            saved_uri = getattr(snapshot, "media_uri", None) or ""
-            try:
-                should_clear = False
-                if not saved_uri:
-                    coordinator = speaker.is_coordinator
-                    if not isinstance(coordinator, bool):
-                        raise RuntimeError("Coordinator state is unavailable")
-                    should_clear = coordinator
-            except (KeyboardInterrupt, SystemExit) as exc:
-                interrupts.append(exc)
-                restore_failed = True
-                should_clear = False
-            except Exception:
-                restore_failed = True
-                should_clear = False
-            if should_clear:
-                uri_cleared = _run_cleanup_step(
-                    lambda: _clear_temporary_uri(speaker),
-                    interrupts,
-                    "Could not clear temporary AV transport URI",
-                )
-                restore_failed = restore_failed or not uri_cleared
+    if original_volume is not None:
+        volume_restored = _run_cleanup_step(
+            lambda: setattr(speaker, "volume", original_volume),
+            interrupts,
+            "Could not restore volume",
+        )
+        restore_failed = restore_failed or not volume_restored
 
-        if original_volume is not None:
-            volume_restored = _run_cleanup_step(
-                lambda: setattr(speaker, "volume", original_volume),
-                interrupts,
-                "Could not restore volume",
-            )
-            restore_failed = restore_failed or not volume_restored
+    if topology_mutated:
+        group_restored = _run_cleanup_step(
+            lambda: restore_target_group(topology),
+            interrupts,
+            "Could not restore Sonos group",
+        )
+        restore_failed = restore_failed or not group_restored
 
-        if topology_mutated:
-            group_restored = _run_cleanup_step(
-                lambda: restore_target_group(topology),
-                interrupts,
-                "Could not restore Sonos group",
-            )
-            restore_failed = restore_failed or not group_restored
+    if snapshot_taken and snapshot is not None:
+        try:
+            if speaker.mute != snapshot.mute:
+                raise RuntimeError("Mute mismatch")
+            # GetMediaInfo reports queue containers, unlike track-info URI.
+            # Regrouping replaces detached transport; do not compare that
+            # inherited source to an isolated target's empty snapshot URI.
+            if snapshot.media_uri and not topology_mutated:
+                media = speaker.avTransport.GetMediaInfo([("InstanceID", 0)])
+                if media["CurrentURI"] != snapshot.media_uri:
+                    raise RuntimeError("Source mismatch")
+                state = speaker.get_current_transport_info()["current_transport_state"]
+                if state != snapshot.transport_state:
+                    raise RuntimeError("Transport mismatch")
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interrupts.append(exc)
+            restore_failed = True
+        except Exception:
+            log.warning("Could not verify restored mute/source/transport")
+            restore_failed = True
 
-        if original_volume is not None:
-            try:
-                if speaker.volume != original_volume:
-                    log.warning("Volume mismatch after restore")
-                    restore_failed = True
-            except (KeyboardInterrupt, SystemExit) as exc:
-                interrupts.append(exc)
+    if original_volume is not None:
+        try:
+            if speaker.volume != original_volume:
+                log.warning("Volume mismatch after restore")
                 restore_failed = True
-            except Exception:
-                log.warning("Could not verify restored volume")
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interrupts.append(exc)
+            restore_failed = True
+        except Exception:
+            log.warning("Could not verify restored volume")
+            restore_failed = True
+    if uri_cleared:
+        try:
+            if speaker.get_current_track_info()["uri"] != "":
+                log.warning("AV transport URI still set after clear")
                 restore_failed = True
-        if uri_cleared:
-            try:
-                if speaker.get_current_track_info()["uri"] != "":
-                    log.warning("AV transport URI still set after clear")
-                    restore_failed = True
-            except (KeyboardInterrupt, SystemExit) as exc:
-                interrupts.append(exc)
-                restore_failed = True
-            except Exception:
-                log.warning("Could not verify cleared transport URI")
-                restore_failed = True
-
-    interrupts.extend(deferred)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interrupts.append(exc)
+            restore_failed = True
+        except Exception:
+            log.warning("Could not verify cleared transport URI")
+            restore_failed = True
 
     pending_interrupt = interrupts[0] if interrupts else None
     return restore_failed, pending_interrupt
@@ -691,9 +876,10 @@ def announce(
     volume: int = DEFAULT_VOLUME,
     model: str = DEFAULT_MODEL,
     voice_id: Optional[str] = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: Optional[float] = DEFAULT_TIMEOUT,
     dry_run: bool = False,
     stability: Optional[str] = None,
+    tts_timeout: float = DEFAULT_TTS_TIMEOUT,
 ) -> None:
     """Full pipeline: validate, discover, synthesise, isolate, play, restore."""
 
@@ -714,7 +900,9 @@ def announce(
         voice_id if voice_id is not None else os.environ.get("ELEVENLABS_VOICE_ID"),
         "--voice-id or ELEVENLABS_VOICE_ID",
     )
-    _validate_timeout(timeout)
+    if timeout is not None:
+        _validate_timeout(timeout)
+    _validate_timeout(tts_timeout)
     if not 0 <= volume <= 100:
         raise ValueError("Volume must be between 0 and 100.")
 
@@ -779,6 +967,7 @@ def announce(
                 except Exception as exc:
                     raise SonosSayError("SONOS_DISCOVERY_FAILED") from exc
                 topology = validate_announcement_target(speaker)
+                _check_supported_sources(topology)
 
                 try:
                     api_key = get_api_key(service, account)
@@ -793,49 +982,61 @@ def announce(
                 try:
                     synthesise_mp3(
                         text, voice_id, model, api_key, mp3_path,
-                        stability=resolved_stability,
+                        stability=resolved_stability, timeout=tts_timeout,
                     )
+                    mp3_bytes = mp3_path.stat().st_size
+                    if mp3_bytes <= 0:
+                        raise RuntimeError("Empty synthesized audio")
+                    playback_timeout = (timeout if timeout is not None
+                                        else math.ceil(mp3_bytes / 16000) + 30)
                 except Exception as exc:
                     raise SonosSayError("ELEVENLABS_SYNTHESIS_FAILED") from exc
                 finally:
                     del api_key
 
+                _check_supported_sources(topology)
                 if topology.detach:
                     detach_target(topology, before_unjoin=arm_group_recovery)
 
                 # Snapshot only after isolation, when the target owns transport.
                 snapshot = Snapshot(speaker)
                 snapshot.snapshot()
+                _check_source_uri(snapshot.media_uri or "")
                 snapshot_taken = True
                 original_volume = speaker.volume
 
                 with serve_file(mp3_path, local_ip, speaker.ip_address) as mp3_url:
+                    recorder = _TransportEvents(speaker, mp3_url)
                     try:
+                        recorder.start()
                         log.info("Serving announcement to the target speaker")
                         verify_isolated_target(topology)
+                        try:
+                            _check_supported_sources(topology, isolated=True)
+                        except SonosSayError:
+                            # Source was never replaced: only regroup, never invoke
+                            # Snapshot's unsupported cloud restore/play path.
+                            snapshot_taken = False
+                            original_volume = None
+                            raise
                         speaker.volume = volume
+                        speaker.mute = False
+                        recorder.arm()
                         speaker.play_uri(mp3_url, title="Announcement")
-                        if not wait_for_playback(speaker, timeout):
+                        if not wait_for_playback(speaker, playback_timeout, events=recorder.queue):
                             raise SonosSayError("SONOS_PLAYBACK_FAILED")
                     finally:
-                        # Deferral must start before server context exit too.
+                        # Deferral covers event/server shutdown and restoration.
                         begin_cleanup()
+                        recorder.close()
             except BaseException as exc:
                 pending_error = exc
             finally:
                 begin_cleanup()
-                try:
-                    restore_failed, cleanup_interrupt = _restore_after_announcement(
-                        speaker, snapshot, snapshot_taken, original_volume,
-                        topology, topology_mutated,
-                    )
-                except (KeyboardInterrupt, SystemExit) as exc:
-                    # Catch interruption before the inner deferral is installed.
-                    signal_guard.deferred.append(exc)
-                    restore_failed, cleanup_interrupt = _restore_after_announcement(
-                        speaker, snapshot, snapshot_taken, original_volume,
-                        topology, topology_mutated,
-                    )
+                restore_failed, cleanup_interrupt = _restore_after_announcement(
+                    speaker, snapshot, snapshot_taken, original_volume,
+                    topology, topology_mutated,
+                )
     finally:
         signal_guard.restore()
 
@@ -912,7 +1113,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_TIMEOUT,
         metavar="SECS",
-        help=f"Max seconds to wait for playback (default: {DEFAULT_TIMEOUT}).",
+        help="Hard playback timeout override (default: ceil(MP3 bytes / 16000) + 30).",
+    )
+    p.add_argument(
+        "--tts-timeout", type=float, default=DEFAULT_TTS_TIMEOUT, metavar="SECS",
+        help="Independent synthesis/header/body timeout (default: 180 seconds).",
     )
     p.add_argument(
         "--dry-run",
@@ -955,8 +1160,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--volume must be between 0 and 100, got {args.volume}.")
 
     # Timeout
-    if not math.isfinite(args.timeout) or args.timeout <= 0:
+    if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
         parser.error("--timeout must be finite and positive.")
+    if not math.isfinite(args.tts_timeout) or args.tts_timeout <= 0:
+        parser.error("--tts-timeout must be finite and positive.")
 
     try:
         announce(
@@ -968,6 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             dry_run=args.dry_run,
             stability=args.stability,
+            tts_timeout=args.tts_timeout,
         )
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)

@@ -14,7 +14,9 @@ description: >-
 - For copied installations, deploy `elevenlabs-voice-policy` alongside this
   skill. A whole-skill symlink resolves shared policy in its real checkout;
   no separate policy symlink is needed.
-- A reachable, supported Sonos speaker on a trusted LAN.
+- A reachable, supported Sonos speaker on a trusted LAN. AVTransport event
+  callbacks require inbound LAN connectivity; only SoCo's default threaded
+  event backend is supported. Do not change firewall settings automatically.
 - Set `ELEVENLABS_VOICE_ID` to the user's own voice ID and `SONOS_ROOM` to their
   intended room. `--voice-id` and `--room` override these values; neither has a
   bundled default.
@@ -52,7 +54,11 @@ python3 scripts/sonos_say.py -
 
 Default volume is `35`. Change `--volume` only when requested or clearly necessary;
 volume effects depend on the room and speaker. `--timeout` must be finite and
-positive (default: 120 seconds). `--help` requires no configuration.
+positive when explicitly supplied. Otherwise playback uses
+`ceil(MP3 bytes / 16000) + 30` seconds, derived after synthesis.
+`--tts-timeout` independently limits synthesis/header/body socket waits
+(default: 180 seconds; finite and positive). These are not total wall-clock
+limits across blocking SoCo calls. `--help` requires no configuration.
 
 ## Voice direction
 
@@ -75,21 +81,36 @@ positive (default: 120 seconds). `--help` requires no configuration.
   mutation. Independent safety observations invalidate SoCo's polling cache;
   active topology subscriptions are unsupported and fail closed. Isolation is
   rechecked before playback; concurrent controllers remain a risk.
-- TTS redirects are refused before a second request. Never expose keys or
+- Unsupported cloud queue sources (`x-rincon-queue:…#<nonzero>`) are refused
+  before source replacement; SoCo cannot reliably restart them. Refusal after
+  isolation performs regroup-only cleanup. Transport, mute, and volume remain
+  unchanged when the source is refused.
+- TTS redirects and non-MP3 MIME/empty bodies are refused. Never expose keys or
   provider error bodies, and never put the API key in arguments or workspace files.
 - Temporary audio uses a fresh random URL restricted to the target speaker's IP.
   Never share or log that URL. HTTP remains unencrypted; this is not safe on an
   untrusted LAN. Temporary audio and the server are cleaned up after use.
-- Playback must reach PLAYING and then STOPPED within the deadline. Missing
-  telemetry, pausing, non-start, and timeout are failures, not success.
+- Playback must reach PLAYING and then STOPPED within the deadline. An
+  attempt-scoped AVTransport recorder subscribes before Play, retaining short
+  clips missed by polling. Prior/unrelated/stale events, lost event evidence,
+  pausing, non-start, and timeout cannot prove success.
+- After snapshot, the target is temporarily unmuted for delivery. Original mute
+  and volume must be restored and read back; mismatches are restoration failures.
 - Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
   deletion. Cleanup attempts captured transport, URI, volume, and group
   restoration; group recovery is armed only at a validated unjoin RPC attempt.
   Restoration failure takes precedence over playback errors or interrupts.
   State restoration is not frame-accurate.
 
-On exit 0, briefly report playback completion and successful cleanup. On failure,
-report only the fixed `SONOS_SAY_ERROR` code. `SONOS_RESTORE_FAILED` means the room
+Idle-standalone empty-URI clearing and real short-clip event delivery remain
+hardware-gated. Offline tests do not establish firmware/firewall acceptance;
+hold merge readiness until those checks are separately approved and verified,
+or the supported scope is explicitly restricted. Detached members skip the
+empty-URI clear because exact regrouping replaces the temporary source.
+
+On exit 0, briefly report helper-observed completion and successful cleanup.
+On failure, report only the fixed `SONOS_SAY_ERROR` code.
+`SONOS_RESTORE_FAILED` means the room
 may need manual restoration/regrouping even if the announcement was heard. Do not
 substitute a macOS system voice unless the user explicitly requests a fallback.
 

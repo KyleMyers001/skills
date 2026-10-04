@@ -48,7 +48,9 @@ class TestVoicePayload(unittest.TestCase):
         self.addCleanup(guard.stop)
 
     def _payload(self, model, stability, text="Hello"):
-        with patch("airpods_say._tts_opener", create=True) as opener:
+        with patch("elevenlabs_voice.tts_opener", create=True) as opener:
+            opener.return_value.open.return_value.status = 200
+            opener.return_value.open.return_value.headers.get.return_value = "audio/mpeg"
             request(model_id=model, stability=stability, text=text)
         req = opener.return_value.open.call_args.args[0]
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(
@@ -76,7 +78,9 @@ class TestVoicePayload(unittest.TestCase):
             model, None)), {"model_id": "eleven_v4", "text": "Hello"})
 
     def test_query_is_url_encoded(self):
-        with patch("airpods_say._tts_opener", create=True) as opener:
+        with patch("elevenlabs_voice.tts_opener", create=True) as opener:
+            opener.return_value.open.return_value.status = 200
+            opener.return_value.open.return_value.headers.get.return_value = "audio/mpeg"
             request(output_format="mp3&other=value")
         req = opener.return_value.open.call_args.args[0]
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(
@@ -96,7 +100,7 @@ class TestVoicePayload(unittest.TestCase):
         )
         for error in errors:
             with self.subTest(error=type(error).__name__):
-                with patch("airpods_say._tts_opener", create=True) as opener:
+                with patch("elevenlabs_voice.tts_opener", create=True) as opener:
                     opener.return_value.open.side_effect = error
                     with self.assertRaises(airpods_say.ElevenLabsError) as raised:
                         request()
@@ -175,7 +179,7 @@ class TestRedirectRejection(unittest.TestCase):
                                      data=b"{}", headers={"xi-api-key": "dummy-key"})
         body = io.BytesIO(b"private-body")
         with self.assertRaises(urllib.error.HTTPError) as raised:
-            airpods_say._RejectRedirects().redirect_request(
+            airpods_say.voice_policy._RejectRedirects().redirect_request(
                 req, body, 302, "private-reason", {}, "http://example.invalid/target")
         raised.exception.close()
         self.assertTrue(body.closed)
