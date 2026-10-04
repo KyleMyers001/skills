@@ -96,6 +96,7 @@ def _set_standalone(sp: MagicMock) -> MagicMock:
     sp.has_satellites = False
     sp.is_visible = True
     sp.zone_group_state.has_subscriptions = False
+    sp.zone_group_state.processed_count = 0
     sp.is_coordinator = True
     sp.mute = False
     sp.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
@@ -716,6 +717,8 @@ class TestGroupedAnnouncement(unittest.TestCase):
         coordinator.is_visible = True
         target.zone_group_state.has_subscriptions = False
         coordinator.zone_group_state.has_subscriptions = False
+        target.zone_group_state.processed_count = 0
+        coordinator.zone_group_state.processed_count = 0
         target.ip_address = "192.168.1.50"
         target.volume = 30
         target.mute = coordinator.mute = False
@@ -839,7 +842,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
         snapshots = []
         with (
             patch("sonos_say.verify_isolated_target",
-                  side_effect=sonos_say.TopologyError("changed")),
+                  side_effect=[None, sonos_say.TopologyError("changed")]),
             self.assertRaises(sonos_say.SonosSayError) as raised,
         ):
             self._announce(target, snapshot_capture=snapshots)
@@ -847,6 +850,22 @@ class TestGroupedAnnouncement(unittest.TestCase):
         target.play_uri.assert_not_called()
         snapshots[0].restore.assert_called_once()
         self.assertEqual(target.volume, 30)
+        self.assertEqual(events, ["detach", "rejoin"])
+        target.join.assert_called_once_with(coordinator)
+
+    def test_failed_presnapshot_recheck_only_restores_group(self):
+        coordinator, events, target = self._grouped_speakers()
+        snapshots = []
+        with (
+            patch("sonos_say.verify_isolated_target",
+                  side_effect=sonos_say.TopologyError("changed")),
+            self.assertRaises(sonos_say.SonosSayError) as raised,
+        ):
+            self._announce(target, snapshot_capture=snapshots)
+        self.assertEqual(raised.exception.code, "SONOS_TOPOLOGY_FAILED")
+        target.play_uri.assert_not_called()
+        snapshots[0].snapshot.assert_not_called()
+        snapshots[0].restore.assert_not_called()
         self.assertEqual(events, ["detach", "rejoin"])
         target.join.assert_called_once_with(coordinator)
 
@@ -2034,7 +2053,8 @@ class TestRestoreVerification(unittest.TestCase):
         snapshot.mute = False
         with patch("sonos_say.restore_target_group") as regroup:
             result = sonos_say._restore_after_announcement(
-                speaker, snapshot, True, 30, MagicMock(), detached,
+                speaker, snapshot, True, 30,
+                sonos_say.validate_announcement_target(speaker), detached,
             )
         if detached:
             regroup.assert_called_once()

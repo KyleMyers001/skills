@@ -73,14 +73,19 @@ limits across blocking SoCo calls. `--help` requires no configuration.
 
 ## Safety and results
 
-- A grouped coordinator is refused: room-targeted speech must not broadcast to
-  its group. A grouped non-coordinator is isolated, then rejoined to its exact
-  prior group. Bonded, hidden, malformed, or unavailable topology is refused.
+- A true multi-room coordinator is refused: room-targeted speech must not
+  broadcast into other rooms. An ungrouped home-theater primary and its explicitly
+  owned satellites count as one room; playback addresses only the primary without
+  unjoining or changing its bonds. An ordinary grouped non-coordinator is isolated,
+  then rejoined to its exact prior group. Bonded rooms grouped with another room,
+  direct satellite/hidden targets, stereo pairs, and unknown topology are refused.
 - Read-only discovery and fresh topology validation precede Keychain lookup
   (bounded to 10 seconds) and synthesis. Synthesis finishes before any group
   mutation. Independent safety observations invalidate SoCo's polling cache;
-  active topology subscriptions are unsupported and fail closed. Isolation is
-  rechecked before playback; concurrent controllers remain a risk.
+  active topology subscriptions are unsupported and fail closed. Device roles
+  must come from the same processed observation. Exact room membership and
+  satellite ownership are rechecked before snapshot and playback; concurrent
+  controllers remain a risk.
 - Unsupported cloud queue sources (`x-rincon-queue:…#<nonzero>`) are refused
   before source replacement; SoCo cannot reliably restart them. Refusal after
   isolation performs regroup-only cleanup. Transport, mute, and volume remain
@@ -96,14 +101,20 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   pausing, non-start, and timeout cannot prove success.
 - After snapshot, the target is temporarily unmuted for delivery. Original mute
   and volume must be restored and read back; mismatches are restoration failures.
+  Bonded cleanup verifies the same room and bonds before transport restoration and
+  afterward. Unsafe topology prevents transport/group writes, but independent
+  primary-local mute/volume recovery is attempted if its identity still matches.
+  No automatic bond repair or regrouping is made. A bonded refusal before the
+  first state-changing RPC incurs no restoration writes.
 - Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
   deletion. Cleanup attempts captured transport, URI, volume, and group
   restoration; group recovery is armed only at a validated unjoin RPC attempt.
   Restoration failure takes precedence over playback errors or interrupts.
   State restoration is not frame-accurate.
 
-Idle-standalone empty-URI clearing and real short-clip event delivery remain
-hardware-gated. Offline tests do not establish firmware/firewall acceptance;
+Bonded-room playback and TV/HDMI restoration, idle empty-URI clearing, and real
+short-clip event delivery remain hardware-gated. Offline tests do not establish
+firmware/firewall acceptance;
 hold merge readiness until those checks are separately approved and verified,
 or the supported scope is explicitly restricted. Detached members skip the
 empty-URI clear because exact regrouping replaces the temporary source.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 from typing import Any, Callable, Optional
 
@@ -16,14 +16,28 @@ class TopologyError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _MemberTopology:
+    """Device roles copied from one processed SoCo topology observation."""
+
+    uid: str
+    visible: Any
+    satellite: Any
+    has_satellites: Any
+    parent_uid: Optional[str]
+
+
+@dataclass(frozen=True)
 class TopologyPlan:
-    """Validated topology needed to isolate and restore one speaker."""
+    """Physical grouping and the validated logical room's playback boundary."""
 
     coordinator: Any
     coordinator_uid: str
     detach: bool
     member_uids: frozenset[str]
     members: tuple[Any, ...]
+    member_topology: tuple[_MemberTopology, ...]
+    room_member_uids: frozenset[str]
+    satellite_parents: frozenset[tuple[str, str]]
     speaker: Any
     speaker_uid: str
 
@@ -38,28 +52,50 @@ def _uid(speaker: Any) -> str:
     return uid
 
 
+def _satellite_parent_uid(member: Any) -> Optional[str]:
+    """SoCo 0.31.2 has no public accessor for parsed satellite ownership."""
+    parent = member._satellite_parent
+    return None if parent is None else _uid(parent)
+
+
 def inspect_topology(speaker: Any) -> TopologyPlan:
-    """Return a fail-closed plan for a standalone, coordinator, or member."""
+    """Observe physical grouping without imposing announcement eligibility."""
     try:
         state = speaker.zone_group_state
         # SoCo 0.31.2 skips polling under subscriptions, even after invalidation.
-        # Require a network observation rather than silently accepting that cache.
         if state.has_subscriptions is not False:
             raise TopologyError("fresh polling is unavailable under subscriptions")
         state.clear_cache()
         group = speaker.group
-        if state.has_subscriptions is not False:
-            raise TopologyError("fresh polling is unavailable under subscriptions")
         coordinator = group.coordinator
-        members = list(group.members)
+        members = tuple(group.members)
+        sample = state.processed_count
+        if not isinstance(sample, int) or isinstance(sample, bool):
+            raise TopologyError("topology observation identity is unavailable")
+        speaker_uid = _uid(speaker)
+        coordinator_uid = _uid(coordinator)
+        member_topology: list[_MemberTopology] = []
+        for member in members:
+            satellite = member.is_satellite
+            member_topology.append(_MemberTopology(
+                uid=_uid(member),
+                visible=member.is_visible,
+                satellite=satellite,
+                has_satellites=member.has_satellites,
+                parent_uid=(_satellite_parent_uid(member)
+                            if satellite is True else None),
+            ))
+        # Public role getters can poll again if the SDK cache expires. Never
+        # combine membership from one processed payload with roles from another.
+        if (state.has_subscriptions is not False
+                or state.processed_count != sample):
+            raise TopologyError("topology changed during observation")
     except Exception as exc:
         raise TopologyError("group topology is unavailable") from exc
     if not members:
         raise TopologyError("group topology has no members")
 
-    speaker_uid = _uid(speaker)
-    coordinator_uid = _uid(coordinator)
-    member_uids = [_uid(member) for member in members]
+    member_uids = [member.uid for member in member_topology]
     if len(member_uids) != len(set(member_uids)):
         raise TopologyError("group topology has duplicate members")
     if member_uids.count(speaker_uid) != 1:
@@ -75,41 +111,61 @@ def inspect_topology(speaker: Any) -> TopologyPlan:
         coordinator_uid=coordinator_uid,
         detach=len(members) > 1 and not target_is_coordinator,
         member_uids=frozenset(member_uids),
-        members=tuple(members),
+        members=members,
+        member_topology=tuple(member_topology),
+        room_member_uids=frozenset({speaker_uid}),
+        satellite_parents=frozenset(),
         speaker=speaker,
         speaker_uid=speaker_uid,
     )
 
 
 def validate_announcement_target(speaker: Any) -> TopologyPlan:
-    """Refuse group-wide playback and unsupported bonded/hidden devices.
-
-    Keep these restrictions separate from inspection: restoration must still
-    observe coordinators with multiple members without trying to play on them.
-    """
+    """Allow one logical room, never multi-room coordinator playback."""
     plan = inspect_topology(speaker)
+    target = next(member for member in plan.member_topology
+                  if member.uid == plan.speaker_uid)
+    if target.visible is not True or target.satellite is not False:
+        raise TopologyError("hidden or satellite targets are unsupported")
+
+    if target.has_satellites is True:
+        if plan.detach or len(plan.member_uids) == 1:
+            raise TopologyError("bonded room is grouped or malformed")
+        parents: set[tuple[str, str]] = set()
+        for member in plan.member_topology:
+            if member.uid == plan.speaker_uid:
+                continue
+            if (member.satellite is not True
+                    or not isinstance(member.visible, bool)
+                    or member.parent_uid != plan.speaker_uid):
+                raise TopologyError("bonded room is grouped or malformed")
+            parents.add((member.uid, plan.speaker_uid))
+        return replace(plan, room_member_uids=plan.member_uids,
+                       satellite_parents=frozenset(parents))
+
+    for member in plan.member_topology:
+        if (member.visible is not True or member.satellite is not False
+                or member.has_satellites is not False):
+            raise TopologyError("bonded or unknown topology is unsupported")
     if len(plan.member_uids) > 1 and not plan.detach:
         raise TopologyError("grouped coordinators cannot receive room announcements")
-    try:
-        for member in plan.members:
-            if (member.is_visible is not True
-                    or member.is_satellite is not False
-                    or member.has_satellites is not False):
-                raise TopologyError("bonded or unknown topology is unsupported")
-    except TopologyError:
-        raise
-    except Exception as exc:
-        raise TopologyError("device topology is unavailable") from exc
     return plan
 
 
+def verify_target_identity(plan: TopologyPlan) -> None:
+    """Local rendering cleanup must never write to a replacement identity."""
+    if _uid(plan.speaker) != plan.speaker_uid:
+        raise TopologyError("target identity changed")
+
+
 def verify_isolated_target(plan: TopologyPlan) -> None:
-    """Recheck the selected identity and isolation immediately before playback."""
+    """Recheck exact logical-room membership and bonds before transport writes."""
     observed = validate_announcement_target(plan.speaker)
     if (observed.speaker_uid != plan.speaker_uid
             or observed.coordinator_uid != plan.speaker_uid
-            or observed.member_uids != frozenset({plan.speaker_uid})):
-        raise TopologyError("target is not isolated")
+            or observed.member_uids != plan.room_member_uids
+            or observed.satellite_parents != plan.satellite_parents):
+        raise TopologyError("target room is not isolated or its bonds changed")
 
 
 def _wait_for_topology(

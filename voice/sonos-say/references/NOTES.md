@@ -45,9 +45,11 @@ file. Credential creation or rotation is a separate, user-authorized operation.
 3. Freshly inspect topology and reject unsafe targets and cloud queue sources
    on the target or its playback owner, before credentials or synthesis.
 4. Read the selected Keychain item; synthesize the exact text to temporary MP3.
-5. Freshly validate again; arm recovery immediately before unjoin and isolate.
-6. Capture transport, volume, and mute; reject a source that changed to cloud.
-7. Start the restricted HTTP server and AVTransport recorder; recheck isolation
+5. Freshly validate before unjoin and isolate ordinary grouped members, arming
+   recovery at the RPC boundary. Ungrouped bonded primaries keep their bonds.
+6. Recheck the exact logical room; capture transport, volume, and mute; reject a
+   source that changed to cloud.
+7. Start the restricted HTTP server and AVTransport recorder; recheck the room
    and source, set volume, temporarily unmute, arm the attempt, and play.
 8. Require correlated PLAYING then STOPPED via events or fresh transport polling.
 9. Stop the owned event subscription and server; restore state and exact grouping.
@@ -98,14 +100,28 @@ not been established by mocked or loopback tests.
 
 ## Topology and restoration
 
-Announcement eligibility is separate from raw topology inspection. Grouped
-coordinators are refused without playback; raw inspection must still accept them
-when checking the original group during restoration. Bonded/hidden devices and
-unknown topology flags are unsupported and fail closed.
+Announcement eligibility is separate from raw physical-group inspection. True
+multi-room coordinators are refused without playback; raw inspection must still
+observe them when checking the original group during restoration. An ungrouped
+home-theater primary with explicitly owned satellites is one logical room, not a
+multi-room group. Only the visible, non-satellite primary receives transport calls;
+no join/unjoin or bond configuration calls are made for this layout. Bonded rooms
+with another logical room, direct satellite/hidden targets, stereo pairs, unknown
+primary flags, and missing/contradictory ownership remain unsupported.
+
+`TopologyPlan` retains raw member identities for ordinary regrouping, plus frozen
+role observations, the selected room's member identities, and satellite-parent
+links. SoCo 0.31.2 exposes parsed satellite ownership only through private
+`_satellite_parent`; that access is isolated and covered by real-parser subprocess
+contracts. Primary-only `has_satellites` flags on satellites do not establish
+ownership. Room names and visibility alone never prove a bond.
 
 Each independent inspection clears `zone_group_state`'s five-second polling
-cache before reading the group. Eligibility uses that same sampled membership.
-This refreshes initial/pre-unjoin/pre-playback checks and every convergence
+cache before reading the group. Eligibility uses copied roles from that same
+processed payload. Public SoCo role getters can poll again: a changed
+`processed_count` during observation, or unavailable observation identity, fails
+closed rather than mixing old membership with new roles. This refreshes
+initial/pre-unjoin/pre-snapshot/pre-playback checks and every convergence
 sample, including coordinator-side restoration checks. Cache-clear/read failures
 fail closed. Active topology subscriptions bypass polling even after invalidation
 in SoCo 0.31.2; they are unsupported and refused rather than treated as fresh.
@@ -113,7 +129,9 @@ Offline cache-aware tests do not establish firmware compatibility.
 
 A grouped member is detached and verified as standalone before snapshot/playback.
 Before unjoining, its identity and original topology are checked again. Immediately
-before playback, its identity and singleton membership are rechecked. Restoration
+before snapshot and playback, its identity and exact selected-room membership
+are rechecked: singleton for an ordinary isolated speaker, primary plus the
+original owned satellites for a bonded room. Restoration
 accepts an already exact original coordinator/member set without a join RPC.
 Otherwise it joins only from the expected isolated-target/original-group-minus-
 target state. Convergence polls every 0.5 seconds for at most five seconds, always
@@ -122,8 +140,17 @@ Concurrent changes fail closed rather than joining a different group.
 Sonos provides no atomic lock against other controllers changing topology during
 playback; the pre-playback check cannot eliminate that race.
 
-Cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring volume.
-An empty saved URI is cleared only on idle standalone targets, not detached
+Bonded cleanup freshly verifies the captured logical room and parent links before
+`Snapshot.restore(fade=False)` and again after restoration. If topology is unsafe
+or unavailable, it skips transport restoration and empty-URI clearing, attempts
+independent target-local mute/volume recovery only on the same identity, and
+reports `SONOS_RESTORE_FAILED`. It does not repair bonds or join a changed group.
+Empty-URI clearing has its own fresh room check. A pre-mutation bonded refusal
+skips restoration altogether; state recovery is armed immediately before the first
+rendering RPC because that call may apply a change and then fail.
+
+Safe cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring
+volume. An empty saved URI is cleared on idle standalone/bonded targets, not detached
 members awaiting regrouping. Mute, volume, source/transport where meaningful,
 and cleared-URI read-back errors or mismatches are failures. Queue source checks
 use `GetMediaInfo.CurrentURI`, not a per-track URI. Cleanup continues
@@ -166,9 +193,14 @@ only: it never invokes cloud Snapshot restore/play.
 
 ### Pending live acceptance
 
-Findings 8 and 10 remain hardware-gated: idle standalone empty-URI clearing
-and real short-clip AVTransport delivery need separately approved firmware and
-callback/firewall checks. A rejected clear remains a restoration failure.
+Bonded-room playback, unchanged bonds, room-scoped HTTP fetching, and actual
+TV/HDMI source restoration need separately approved live acceptance. Real SDK
+parser and synthetic TV-source Snapshot contracts establish software behavior,
+not firmware compatibility or audible playback.
+
+Findings 8 and 10 remain hardware-gated: idle empty-URI clearing and real short-clip
+AVTransport delivery need separately approved firmware and callback/firewall checks.
+A rejected clear remains a restoration failure.
 Loopback SDK, dummy-decoder, and mocked speaker evidence do not prove audible
 playback or firmware support. Hold merge readiness unless live checks pass or
 Kyle approves explicit supported-source/short-clip restrictions.

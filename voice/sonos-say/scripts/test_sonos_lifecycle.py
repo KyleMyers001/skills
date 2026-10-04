@@ -35,6 +35,7 @@ for uid, sp in (("target", target), ("coord", coord)):
     sp.uid, sp.is_visible = uid, True
     sp.is_satellite, sp.has_satellites = False, False
     sp.zone_group_state.has_subscriptions = False
+    sp.zone_group_state.processed_count = 0
     sp.volume, sp.ip_address, sp.mute = 30, "192.0.2.2", False
     sp.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
 
