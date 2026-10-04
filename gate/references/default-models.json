@@ -15,16 +15,16 @@
   "qa": {
     "kind": "pi",
     "model": "openai-codex/gpt-6-luna",
-    "thinking": "xhigh",
+    "thinking": "max",
     "exclude_tools": "edit,write",
-    "expect_startup": ["gpt-6-luna", "gpt-6-luna • xhigh"]
+    "expect_startup": ["gpt-6-luna", "gpt-6-luna • max"]
   },
   "auditor": {
     "kind": "pi",
     "model": "openai-codex/gpt-6-luna",
-    "thinking": "xhigh",
+    "thinking": "max",
     "exclude_tools": "edit,write",
-    "expect_startup": ["gpt-6-luna", "gpt-6-luna • xhigh"]
+    "expect_startup": ["gpt-6-luna", "gpt-6-luna • max"]
   },
   "developer": {
     "kind": "pi",
