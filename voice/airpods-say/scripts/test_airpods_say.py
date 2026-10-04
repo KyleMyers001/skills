@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""
+Tests for airpods_say.py — focused on the play_stream() drain bug fix.
+
+Bug fixed: play_stream() previously closed ffplay stdin at HTTP-stream EOF,
+then called proc.wait(timeout=5).  If ffplay had buffered audio that took
+>5 s to play, subprocess.TimeoutExpired triggered proc.kill(), but the
+function still returned exit_code 0 (false success).
+
+Fix: after stdin EOF, _drain_ffplay() is called.  It:
+  - polls ffplay at _DRAIN_POLL_SECS intervals
+  - continues monitoring the AirPods device (device_changed event)
+  - uses a duration-aware safety timeout (not a fixed 5 s)
+  - returns 0 only on natural exit, 1 on timeout, 3 on device change
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import threading
+import time
+import unittest
+from contextlib import ExitStack
+from unittest.mock import MagicMock, patch
+import os
+
+# Ensure the script directory is on sys.path
+sys.path.insert(0, os.path.dirname(__file__))
+
+import airpods_say
+from airpods_say import (
+    _drain_ffplay,
+    _Timing,
+    _MP3_128K_BYTES_PER_SEC,
+    _DRAIN_TIMEOUT_MIN_SECS,
+    _DRAIN_TIMEOUT_MAX_SECS,
+    _DRAIN_TIMEOUT_SCALE,
+    _DRAIN_POLL_SECS,
+    play_stream,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_proc(poll_results: list) -> MagicMock:
+    """
+    Create a mock subprocess.Popen whose poll() returns successive values
+    from poll_results (cycling the last value once exhausted).
+    """
+    proc = MagicMock(spec=subprocess.Popen)
+    results = list(poll_results)
+    call_index = [0]
+
+    def _poll():
+        i = call_index[0]
+        val = results[min(i, len(results) - 1)]
+        call_index[0] += 1
+        return val
+
+    proc.poll.side_effect = _poll
+    proc.terminate.return_value = None
+    proc.kill.return_value = None
+    proc.wait.return_value = 0
+    proc.stdin = MagicMock()
+    proc.stdin.write.return_value = None
+    proc.stdin.flush.return_value = None
+    proc.stdin.close.return_value = None
+    return proc
+
+
+def _no_timing() -> _Timing:
+    return _Timing(enabled=False)
+
+
+# ---------------------------------------------------------------------------
+# _drain_ffplay unit tests
+# ---------------------------------------------------------------------------
+
+class TestDrainFfplayNaturalExit(unittest.TestCase):
+    """ffplay exits naturally → _drain_ffplay returns 0."""
+
+    def test_exits_immediately(self):
+        """proc.poll() returns 0 on the very first check."""
+        proc = _make_proc([0])
+        dc = threading.Event()
+        rc = _drain_ffplay(proc, dc, bytes_written=8000, debug=False, _t=_no_timing())
+        self.assertEqual(rc, 0)
+        proc.kill.assert_not_called()
+        proc.terminate.assert_not_called()
+
+    def test_exits_after_several_polls(self):
+        """proc.poll() returns None a few times then exits."""
+        proc = _make_proc([None, None, None, 0])
+        dc = threading.Event()
+        # Use tiny poll interval to keep test fast
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        try:
+            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+        self.assertEqual(rc, 0)
+        proc.kill.assert_not_called()
+
+    def test_buffered_audio_longer_than_5s_not_killed(self):
+        """
+        Regression: drain representing >5 s of simulated buffered audio must
+        not kill ffplay.  Uses mocked time.monotonic and time.sleep so the
+        test completes instantly yet exercises simulated elapsed time well
+        beyond the old hard-coded 5-second proc.wait timeout.
+
+        Setup:
+          - safety_secs = _DRAIN_TIMEOUT_MIN_SECS = 30 s
+          - Each call to time.monotonic() advances simulated clock by 2 s
+          - deadline = 0 + 30 = 30 s
+          - proc.poll() returns None for 5 iterations (~10 s simulated)
+            then exits naturally
+          - Old code (proc.wait timeout=5) would have killed at ~5 s;
+            new drain (30 s safety) lets it finish → return 0
+        """
+        simulated_time = [0.0]
+
+        def _mono():
+            t = simulated_time[0]
+            simulated_time[0] += 2.0   # advance 2 s per call
+            return t
+
+        # poll() returns None 5 times (10 s simulated) then exits naturally.
+        poll_count = [0]
+
+        def _poll():
+            poll_count[0] += 1
+            return None if poll_count[0] <= 5 else 0
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.side_effect = _poll
+        proc.kill.return_value = None
+        dc = threading.Event()
+
+        orig_min = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 30.0
+        try:
+            with patch("airpods_say.time.monotonic", side_effect=_mono):
+                with patch("airpods_say.time.sleep"):   # no-op; no wall time spent
+                    rc = _drain_ffplay(
+                        proc, dc, bytes_written=0, debug=False, _t=_no_timing()
+                    )
+        finally:
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+
+        self.assertEqual(rc, 0,
+                         "Drain >5 s simulated must succeed; must not kill ffplay")
+        proc.kill.assert_not_called()
+
+
+class TestDrainFfplayDeviceChange(unittest.TestCase):
+    """Device changes during drain → _drain_ffplay returns 3."""
+
+    def test_device_already_changed_at_entry(self):
+        """device_changed is set before we even start polling."""
+        proc = _make_proc([None])  # never exits naturally
+        dc = threading.Event()
+        dc.set()
+        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+        self.assertEqual(rc, 3)
+        proc.terminate.assert_called_once()
+
+    def test_device_changes_mid_drain(self):
+        """Device changes after a couple of polls."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # never exits naturally
+        proc.terminate.return_value = None
+        proc.kill.return_value = None
+        proc.wait.return_value = 0
+
+        dc = threading.Event()
+
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        try:
+            # Set device_changed after a short delay in a thread
+            def _trigger():
+                time.sleep(0.03)
+                dc.set()
+
+            t = threading.Thread(target=_trigger, daemon=True)
+            t.start()
+            rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+            t.join(timeout=1)
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+
+        self.assertEqual(rc, 3)
+        proc.terminate.assert_called_once()
+
+    def test_device_change_returns_3_not_0(self):
+        """Regression: device change during drain must never return 0."""
+        proc = _make_proc([None, None, None, None, 0])  # would exit naturally
+        dc = threading.Event()
+        dc.set()  # already changed
+
+        rc = _drain_ffplay(proc, dc, bytes_written=16000, debug=False, _t=_no_timing())
+
+        self.assertNotEqual(rc, 0, "Device change must not be reported as success")
+        self.assertEqual(rc, 3)
+
+    def test_device_change_terminates_then_kills_on_timeout(self):
+        """If terminate doesn't stop ffplay in 3 s, kill is called."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
+        proc.terminate.return_value = None
+        # Simulate proc.wait raising TimeoutExpired
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="ffplay", timeout=3)
+        proc.kill.return_value = None
+
+        dc = threading.Event()
+        dc.set()
+
+        rc = _drain_ffplay(proc, dc, bytes_written=1000, debug=False, _t=_no_timing())
+        self.assertEqual(rc, 3)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+
+class TestDrainFfplaySafetyTimeout(unittest.TestCase):
+    """Safety timeout reached → _drain_ffplay kills ffplay and returns 1."""
+
+    def _drain_with_tiny_timeout(self, bytes_written: int) -> int:
+        """Run drain with _DRAIN_TIMEOUT_MIN_SECS patched to 0.05 s."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # never exits
+        proc.kill.return_value = None
+        dc = threading.Event()
+
+        orig_min = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.05
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        try:
+            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False, _t=_no_timing())
+        finally:
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+
+        proc.kill.assert_called_once()
+        return rc
+
+    def test_timeout_returns_1(self):
+        """Safety timeout returns 1, not 0."""
+        rc = self._drain_with_tiny_timeout(bytes_written=0)
+        self.assertEqual(rc, 1)
+
+    def test_timeout_is_not_success(self):
+        """Regression: safety timeout must never be reported as success (0)."""
+        rc = self._drain_with_tiny_timeout(bytes_written=0)
+        self.assertNotEqual(rc, 0, "Drain timeout must not return 0 (false success)")
+
+    def test_timeout_kills_process(self):
+        """After timeout, proc.kill() must have been called."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
+        proc.kill.return_value = None
+        dc = threading.Event()
+
+        orig_min = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.05
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        try:
+            _drain_ffplay(proc, dc, bytes_written=0, debug=False, _t=_no_timing())
+        finally:
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+
+        proc.kill.assert_called_once()
+
+
+class TestDrainFfplayDurationAwareTimeout(unittest.TestCase):
+    """Safety timeout scales with bytes written (duration-aware)."""
+
+    def _compute_safety_secs(self, bytes_written: int) -> float:
+        """Replicate the safety_secs formula from _drain_ffplay."""
+        estimated = bytes_written / _MP3_128K_BYTES_PER_SEC
+        return max(
+            _DRAIN_TIMEOUT_MIN_SECS,
+            min(estimated * _DRAIN_TIMEOUT_SCALE, _DRAIN_TIMEOUT_MAX_SECS),
+        )
+
+    def test_zero_bytes_uses_minimum(self):
+        secs = self._compute_safety_secs(0)
+        self.assertEqual(secs, _DRAIN_TIMEOUT_MIN_SECS)
+
+    def test_short_audio_uses_minimum(self):
+        """1 second of audio → safety_secs still at minimum."""
+        one_sec = _MP3_128K_BYTES_PER_SEC  # 16000 bytes = 1 s
+        secs = self._compute_safety_secs(one_sec)
+        self.assertEqual(secs, _DRAIN_TIMEOUT_MIN_SECS)
+
+    def test_long_audio_scales_beyond_minimum(self):
+        """30 s of audio → safety_secs = 30 * 2 = 60 (> min of 30)."""
+        thirty_sec = 30 * _MP3_128K_BYTES_PER_SEC
+        secs = self._compute_safety_secs(thirty_sec)
+        expected = 30.0 * _DRAIN_TIMEOUT_SCALE  # 60.0
+        self.assertAlmostEqual(secs, expected, places=5)
+        self.assertGreater(secs, _DRAIN_TIMEOUT_MIN_SECS)
+
+    def test_very_long_audio_capped_at_maximum(self):
+        """
+        Very large bytes_written → safety_secs capped at _DRAIN_TIMEOUT_MAX_SECS.
+        """
+        huge = 10_000 * _MP3_128K_BYTES_PER_SEC  # 10000 s of audio
+        secs = self._compute_safety_secs(huge)
+        self.assertEqual(secs, _DRAIN_TIMEOUT_MAX_SECS)
+
+    def test_timeout_actually_scales_in_drain(self):
+        """
+        Patch constants; verify that drain waits longer for more bytes.
+        Proc exits after a fixed number of polls; with enough bytes the
+        drain should complete naturally (return 0) rather than timing out.
+        """
+        # 20 seconds of audio bytes → estimated = 20 s → safety = 40 s
+        bytes_written = 20 * _MP3_128K_BYTES_PER_SEC
+
+        orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        orig_max  = airpods_say._DRAIN_TIMEOUT_MAX_SECS
+        orig_scale = airpods_say._DRAIN_TIMEOUT_SCALE
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+
+        # Set a very short poll so the test is fast, but keep scale high
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.0   # no minimum floor
+        airpods_say._DRAIN_TIMEOUT_MAX_SECS = 9999.0
+        airpods_say._DRAIN_TIMEOUT_SCALE    = 2.0
+        airpods_say._DRAIN_POLL_SECS        = 0.005
+
+        try:
+            # With the above, safety_secs = 20 * 2.0 = 40 s.
+            # Proc exits after ~5 polls (0.025 s) → should return 0.
+            call_count = [0]
+            def _poll():
+                call_count[0] += 1
+                return None if call_count[0] < 5 else 0
+
+            proc = MagicMock(spec=subprocess.Popen)
+            proc.poll.side_effect = _poll
+            proc.kill.return_value = None
+            dc = threading.Event()
+
+            rc = _drain_ffplay(proc, dc, bytes_written=bytes_written, debug=False, _t=_no_timing())
+        finally:
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+            airpods_say._DRAIN_TIMEOUT_MAX_SECS = orig_max
+            airpods_say._DRAIN_TIMEOUT_SCALE    = orig_scale
+            airpods_say._DRAIN_POLL_SECS        = orig_poll
+
+        self.assertEqual(rc, 0)
+        proc.kill.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# play_stream integration tests (mocked subprocess + http response)
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    """
+    Minimal fake http.client.HTTPResponse that yields `chunks` then EOF (b"").
+    Provides read1() and a real fileno() via an os.pipe so select() works.
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._data = b"".join(chunks)
+        self._pos = 0
+        # Create a real pipe; write all data immediately so select sees it ready.
+        self._r, self._w = os.pipe()
+        os.write(self._w, self._data)
+        os.close(self._w)
+        self.fp = True  # non-None: stream not exhausted yet
+
+    def fileno(self) -> int:
+        return self._r
+
+    def read1(self, size: int) -> bytes:
+        chunk = os.read(self._r, size) if self._pos < len(self._data) else b""
+        if not chunk:
+            self.fp = None  # mimic http.client EOF behaviour
+        self._pos += len(chunk)
+        return chunk
+
+    def read(self, size: int = -1) -> bytes:
+        return self.read1(size)
+
+    def close(self) -> None:
+        try:
+            os.close(self._r)
+        except OSError:
+            pass
+
+
+class TestPlayStreamDrainIntegration(unittest.TestCase):
+    """
+    Integration tests for play_stream() exercising the drain path.
+
+    We patch:
+      - subprocess.Popen          → controlled mock
+      - get_default_output_device_name → stable AirPods name
+      - signal.signal             → no-op (avoids signal handler side effects)
+    """
+
+    _AIRPODS_NAME = "Test AirPods Pro"
+
+    def _run_play_stream(
+        self,
+        chunks: list[bytes],
+        proc_mock: MagicMock,
+        device_name_side_effect=None,
+    ) -> int:
+        """Helper: run play_stream() with mocked subprocess and device."""
+        resp = _FakeResponse(chunks)
+        device_fn = device_name_side_effect or (lambda: self._AIRPODS_NAME)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("airpods_say.subprocess.Popen", return_value=proc_mock)
+            )
+            stack.enter_context(
+                patch("airpods_say.get_default_output_device_name",
+                      side_effect=device_fn)
+            )
+            stack.enter_context(patch("airpods_say.signal.signal"))
+            try:
+                rc = play_stream(
+                    resp=resp,
+                    ffplay_path="/usr/bin/ffplay",
+                    expected_device_name=self._AIRPODS_NAME,
+                    debug=False,
+                    poll_interval=0.05,
+                )
+            finally:
+                resp.close()
+
+        return rc
+
+    def test_stream_eof_natural_drain_returns_0(self):
+        """
+        Stream ends, drain completes naturally → play_stream returns 0.
+        """
+        # Proc polls None a few times then exits
+        call_count = [0]
+        def _poll():
+            call_count[0] += 1
+            return None if call_count[0] < 4 else 0
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.side_effect = _poll
+        proc.stdin = MagicMock()
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 5.0
+        try:
+            rc = self._run_play_stream(
+                chunks=[b"audio-data-chunk"],
+                proc_mock=proc,
+            )
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+
+        self.assertEqual(rc, 0)
+        proc.kill.assert_not_called()
+
+    def test_device_changes_during_drain_returns_3(self):
+        """
+        AirPods change after stream EOF but during drain → play_stream returns 3.
+        """
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # never exits naturally
+        proc.stdin = MagicMock()
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        # Device changes to non-AirPods on the 3rd call
+        call_count = [0]
+        def _device():
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                return "MacBook Pro Speakers"
+            return self._AIRPODS_NAME
+
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 5.0
+        try:
+            rc = self._run_play_stream(
+                chunks=[b"audio-data-chunk"],
+                proc_mock=proc,
+                device_name_side_effect=_device,
+            )
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+
+        self.assertEqual(rc, 3)
+
+    def test_drain_timeout_not_success(self):
+        """
+        Drain safety timeout exceeded → play_stream does NOT return 0.
+        """
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # hung forever
+        proc.stdin = MagicMock()
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 0.05  # very short for test
+        try:
+            rc = self._run_play_stream(
+                chunks=[b"audio-data-chunk"],
+                proc_mock=proc,
+            )
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+
+        self.assertNotEqual(rc, 0, "Drain timeout must not be reported as success")
+        self.assertEqual(rc, 1)
+        proc.kill.assert_called()
+
+    def test_bytes_written_tracked_nonzero(self):
+        """
+        When audio chunks are piped to ffplay, bytes_written is non-zero
+        so that the duration-aware drain timeout scales up from the minimum.
+
+        We verify indirectly: with a 30-byte chunk at 16000 B/s the estimated
+        audio is < 0.002 s → safety_secs rounds to DRAIN_TIMEOUT_MIN_SECS.
+        This test just confirms play_stream completes without error.
+        """
+        call_count = [0]
+        def _poll():
+            call_count[0] += 1
+            return 0 if call_count[0] > 2 else None
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.side_effect = _poll
+        proc.stdin = MagicMock()
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        orig_poll = airpods_say._DRAIN_POLL_SECS
+        orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
+        airpods_say._DRAIN_POLL_SECS = 0.01
+        airpods_say._DRAIN_TIMEOUT_MIN_SECS = 5.0
+        try:
+            rc = self._run_play_stream(
+                chunks=[b"x" * 30],
+                proc_mock=proc,
+            )
+        finally:
+            airpods_say._DRAIN_POLL_SECS = orig_poll
+            airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
+
+        self.assertEqual(rc, 0)
+
+    def test_ffplay_unexpected_death_returns_1(self):
+        """
+        If ffplay exits on its own before stream EOF (e.g., crashed), the
+        function must return 1 with a concise stderr error, not false success 0.
+        """
+        # proc.poll() immediately non-None → triggers the unexpected-death path
+        # before any chunk is read from the response.
+        proc = _make_proc([1])  # exit code 1 from the start; cycles 1 forever
+        proc.stdin = MagicMock()
+
+        rc = self._run_play_stream(chunks=[b"audio-data"], proc_mock=proc)
+
+        self.assertEqual(rc, 1)
+        proc.kill.assert_not_called()   # already dead; no kill needed
+
+    def test_ffplay_unexpected_death_not_zero(self):
+        """Regression: unexpected ffplay death must never be reported as success."""
+        proc = _make_proc([2])  # non-zero exit; cycles forever
+        proc.stdin = MagicMock()
+
+        rc = self._run_play_stream(chunks=[b"audio-data"], proc_mock=proc)
+
+        self.assertNotEqual(rc, 0, "Unexpected ffplay death must not return 0")
+
+    def test_broken_pipe_returns_1(self):
+        """
+        If ffplay's stdin pipe breaks while writing audio data, the function
+        must return 1 with a concise stderr error, not false success 0.
+        """
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None        # proc is nominally alive
+        proc.stdin = MagicMock()
+        proc.stdin.write.side_effect = BrokenPipeError("broken pipe")
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        rc = self._run_play_stream(chunks=[b"audio-data"], proc_mock=proc)
+
+        self.assertEqual(rc, 1)
+
+    def test_broken_pipe_not_zero(self):
+        """Regression: BrokenPipeError must never be reported as success."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
+        proc.stdin = MagicMock()
+        proc.stdin.write.side_effect = BrokenPipeError("broken pipe")
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        rc = self._run_play_stream(chunks=[b"audio-data"], proc_mock=proc)
+
+        self.assertNotEqual(rc, 0, "BrokenPipeError must not return 0 (false success)")
+
+
+# ---------------------------------------------------------------------------
+# Existing behaviour: non-drain paths still work
+# ---------------------------------------------------------------------------
+
+class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
+    """Device change detected in the main streaming loop (before EOF)."""
+
+    _AIRPODS_NAME = "Test AirPods Pro"
+
+    def test_device_change_mid_stream_returns_3(self):
+        """
+        If the device changes while data is still streaming (before EOF),
+        play_stream returns 3 and does not enter the drain path.
+        """
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
+        proc.stdin = MagicMock()
+        proc.kill.return_value = None
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+
+        # Provide an infinite stream of data — device change must stop it
+        # We'll trigger the device change via the monitor thread.
+        class _InfiniteResp:
+            def __init__(self):
+                self._r, self._w = os.pipe()
+                # Write some data so select() sees it ready immediately
+                os.write(self._w, b"a" * 512)
+                self.fp = True
+                self._sent = 0
+
+            def fileno(self):
+                return self._r
+
+            def read1(self, size):
+                # Return a chunk; after 3 reads trigger device change
+                self._sent += 1
+                if self._sent > 100:
+                    return b""  # eventual EOF safety
+                try:
+                    return os.read(self._r, min(size, 32))
+                except OSError:
+                    return b""
+
+            def read(self, size=-1):
+                return self.read1(size)
+
+            def close(self):
+                try:
+                    os.close(self._r)
+                except OSError:
+                    pass
+                try:
+                    os.close(self._w)
+                except OSError:
+                    pass
+
+        resp = _InfiniteResp()
+
+        # Device changes after 2 successful queries
+        call_count = [0]
+        def _device():
+            call_count[0] += 1
+            if call_count[0] > 2:
+                return "MacBook Pro Speakers"
+            return self._AIRPODS_NAME
+
+        with patch("airpods_say.subprocess.Popen", return_value=proc):
+            with patch("airpods_say.get_default_output_device_name",
+                       side_effect=_device):
+                with patch("airpods_say.signal.signal"):
+                    try:
+                        rc = play_stream(
+                            resp=resp,
+                            ffplay_path="/usr/bin/ffplay",
+                            expected_device_name=self._AIRPODS_NAME,
+                            debug=False,
+                            poll_interval=0.02,
+                        )
+                    finally:
+                        resp.close()
+
+        self.assertEqual(rc, 3)
+
+
+# ---------------------------------------------------------------------------
+# Constant sanity checks
+# ---------------------------------------------------------------------------
+
+class TestDrainConstants(unittest.TestCase):
+    def test_bytes_per_sec_matches_128kbps(self):
+        self.assertEqual(_MP3_128K_BYTES_PER_SEC, 128_000 // 8)
+        self.assertEqual(_MP3_128K_BYTES_PER_SEC, 16_000)
+
+    def test_min_less_than_max(self):
+        self.assertLess(_DRAIN_TIMEOUT_MIN_SECS, _DRAIN_TIMEOUT_MAX_SECS)
+
+    def test_scale_greater_than_one(self):
+        self.assertGreater(_DRAIN_TIMEOUT_SCALE, 1.0,
+                           "Scale < 1 would not give buffer margin")
+
+    def test_poll_secs_reasonable(self):
+        self.assertGreater(_DRAIN_POLL_SECS, 0)
+        self.assertLess(_DRAIN_POLL_SECS, 1.0,
+                        "Poll interval >= 1 s is too coarse for device-change detection")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
