@@ -26,8 +26,9 @@ class FakeSpeaker:
         self.mute = True
         self.uri = 'http://example.invalid/radio'
         self.state = 'STOPPED'
-        self.zone_group_state = SimpleNamespace(has_subscriptions=False,
-                                               clear_cache=lambda: None)
+        self.zone_group_state = SimpleNamespace(
+            has_subscriptions=False, processed_count=0, clear_cache=lambda: None,
+        )
         self.group = SimpleNamespace(coordinator=self, members=[self])
         self.avTransport = SimpleNamespace(GetMediaInfo=self.media,
                                            SetAVTransportURI=MagicMock(side_effect=self.set_uri))
@@ -47,10 +48,11 @@ class FakeSpeaker:
     def set_uri(self, args):
         self.uri = dict(args)['CurrentURI']
 
-    def play(self, uri, **kwargs):
+    def play(self, uri, meta='', **kwargs):
         if self.before_play:
             self.before_play()
-        self.uri, self.state = uri, 'PLAYING'
+        self.uri = uri
+        self.state = 'PLAYING' if kwargs.get('start', True) else 'STOPPED'
 
     def get_current_track_info(self):
         return {'uri': self.uri}
@@ -65,6 +67,24 @@ class FakeSpeaker:
 
     def regroup(self, coord):
         self.group = coord.group = SimpleNamespace(coordinator=coord, members=[coord, self])
+
+
+def make_bonded_room(primary=None):
+    """One visible home-theater primary with explicitly owned satellites."""
+    primary = primary if primary is not None else FakeSpeaker()
+    primary.has_satellites = True
+    satellites = (FakeSpeaker('satellite-left'), FakeSpeaker('satellite-right'))
+    members = [primary, *satellites]
+    group = SimpleNamespace(coordinator=primary, members=members)
+    for index, satellite in enumerate(satellites, start=3):
+        satellite.is_visible = False
+        satellite.is_satellite = True
+        satellite._satellite_parent = primary
+        satellite.ip_address = f'192.0.2.{index}'
+    for member in members:
+        member.group = group
+        member.zone_group_state = primary.zone_group_state
+    return primary, satellites
 
 
 class FakeSnapshot:

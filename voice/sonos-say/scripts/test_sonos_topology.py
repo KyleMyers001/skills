@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import sonos_topology as topology
+from sonos_test_support import FakeSpeaker, make_bonded_room
 
 
 def _speaker(uid: str) -> MagicMock:
@@ -16,6 +21,7 @@ def _speaker(uid: str) -> MagicMock:
     speaker.has_satellites = False
     speaker.is_visible = True
     speaker.zone_group_state.has_subscriptions = False
+    speaker.zone_group_state.processed_count = 0
     return speaker
 
 
@@ -235,6 +241,139 @@ class TestTopologyLifecycle(unittest.TestCase):
             topology.restore_target_group(plan, timeout=0)
 
 
+class TestBondedRoomEligibility(unittest.TestCase):
+    def test_primary_and_owned_satellites_are_one_room(self):
+        primary, satellites = make_bonded_room()
+
+        plan = topology.validate_announcement_target(primary)
+        topology.verify_isolated_target(plan)
+        topology.detach_target(plan)
+        topology.restore_target_group(plan)
+
+        self.assertFalse(plan.detach)
+        self.assertEqual(plan.room_member_uids,
+                         frozenset(member.uid for member in (primary, *satellites)))
+        self.assertEqual(plan.satellite_parents,
+                         frozenset((sat.uid, primary.uid) for sat in satellites))
+        for member in (primary, *satellites):
+            member.unjoin.assert_not_called()
+            member.join.assert_not_called()
+            member.play_uri.assert_not_called()
+
+    def test_identical_room_names_do_not_prove_bonding(self):
+        primary, satellites = make_bonded_room()
+        other = FakeSpeaker('another-room')
+        primary.group.members.append(other)
+        other.group = primary.group
+        for member in (primary, *satellites, other):
+            member.player_name = 'Same Room'
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(primary)
+
+
+    def test_unknown_or_contradictory_bonding_fails_closed(self):
+        cases = ('missing-parent', 'foreign-parent', 'unknown-satellite',
+                 'unknown-visibility', 'missing-satellites', 'duplicate',
+                 'unknown-primary', 'contradictory-primary')
+        for case in cases:
+            with self.subTest(case=case):
+                primary, satellites = make_bonded_room()
+                if case == 'missing-parent':
+                    del satellites[0]._satellite_parent
+                elif case == 'foreign-parent':
+                    satellites[0]._satellite_parent = FakeSpeaker('foreign')
+                elif case == 'unknown-satellite':
+                    satellites[0].is_satellite = None
+                elif case == 'unknown-visibility':
+                    satellites[0].is_visible = None
+                elif case == 'missing-satellites':
+                    primary.group.members = [primary]
+                elif case == 'duplicate':
+                    satellites[0].uid = satellites[1].uid
+                elif case == 'unknown-primary':
+                    primary.has_satellites = None
+                elif case == 'contradictory-primary':
+                    primary.has_satellites = False
+                with self.assertRaises(topology.TopologyError):
+                    topology.validate_announcement_target(primary)
+                primary.unjoin.assert_not_called()
+                primary.play_uri.assert_not_called()
+
+    def test_direct_satellite_and_hidden_primary_are_refused(self):
+        primary, satellites = make_bonded_room()
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(satellites[0])
+        primary.is_visible = False
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(primary)
+
+    def test_satellite_primary_only_flags_do_not_determine_ownership(self):
+        primary, satellites = make_bonded_room()
+        satellites[0].has_satellites = None
+        satellites[1].has_satellites = True
+        topology.validate_announcement_target(primary)
+
+    def test_bonded_member_of_multiroom_group_is_never_detached(self):
+        primary, satellites = make_bonded_room()
+        coordinator = FakeSpeaker('other-room')
+        primary.group.members.append(coordinator)
+        primary.group.coordinator = coordinator
+        plan = topology.inspect_topology(primary)
+        with self.assertRaises(topology.TopologyError):
+            topology.detach_target(plan)
+        primary.unjoin.assert_not_called()
+        primary.join.assert_not_called()
+
+    def test_exact_membership_and_parent_links_survive_mutable_sdk_objects(self):
+        for change in ('parent', 'remove', 'add', 'coordinator'):
+            with self.subTest(change=change):
+                primary, satellites = make_bonded_room()
+                plan = topology.validate_announcement_target(primary)
+                saved_parents = frozenset((sat.uid, primary.uid) for sat in satellites)
+                if change == 'parent':
+                    satellites[0]._satellite_parent = FakeSpeaker('foreign')
+                elif change == 'remove':
+                    primary.group.members.remove(satellites[0])
+                elif change == 'add':
+                    extra = FakeSpeaker('new-satellite')
+                    extra.is_visible, extra.is_satellite = False, True
+                    extra._satellite_parent = primary
+                    primary.group.members.append(extra)
+                else:
+                    primary.group.coordinator = satellites[0]
+                self.assertEqual(plan.satellite_parents, saved_parents)
+                self.assertEqual(len(plan.room_member_uids), 3)
+                with self.assertRaises(topology.TopologyError):
+                    topology.verify_isolated_target(plan)
+
+    def test_raw_inspection_keeps_unknown_eligibility_flags(self):
+        primary, satellites = make_bonded_room()
+        primary.has_satellites = None
+        plan = topology.inspect_topology(primary)
+        self.assertEqual(len(plan.member_uids), 3)
+        self.assertIsNone(next(member for member in plan.member_topology
+                               if member.uid == primary.uid).has_satellites)
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(primary)
+
+    def test_role_getters_cannot_mix_processed_topology_observations(self):
+        primary = _speaker('target')
+        _set_group(primary, primary, [primary])
+        def newer_sample():
+            primary.zone_group_state.processed_count += 1
+            return True
+        with patch.object(type(primary), 'is_visible', create=True,
+                          new_callable=PropertyMock, side_effect=newer_sample):
+            with self.assertRaises(topology.TopologyError):
+                topology.validate_announcement_target(primary)
+
+    def test_missing_observation_identity_is_refused(self):
+        primary, satellites = make_bonded_room()
+        primary.zone_group_state.processed_count = None
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(primary)
+
+
 class _Household:
     """SoCo's shared five-second polling cache, independent of live state."""
 
@@ -245,6 +384,7 @@ class _Household:
         self.cache_until = -1.0
         self.has_subscriptions = False
         self.samples = 0
+        self.processed_count = 0
         self.on_sleep = None
 
     def clear_cache(self):
@@ -255,6 +395,7 @@ class _Household:
             self.cached = dict(self.live)
             self.cache_until = self.now + 5
             self.samples += 1
+            self.processed_count += 1
         return self.cached[uid]
 
     def group_members(self, coordinator, members):
@@ -435,6 +576,83 @@ class TestIdempotentTopology(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology.restore_target_group(self.plan, timeout=0)
         self.target.join.assert_not_called()
+
+
+_SDK_TOPOLOGY = r'''
+import sys
+from unittest.mock import patch
+import soco
+from soco.zonegroupstate import ZoneGroupState
+import sonos_topology as topology
+assert soco.__version__ == '0.31.2'
+primary_xml = """
+<ZoneGroupMember UUID="primary" ZoneName="Same Room"
+ Location="http://192.0.2.2:1400/xml/device_description.xml">
+ <Satellite UUID="left" ZoneName="Same Room" Invisible="1"
+  Location="http://192.0.2.3:1400/xml/device_description.xml"/>
+ <Satellite UUID="right" ZoneName="Same Room" Invisible="1"
+  Location="http://192.0.2.4:1400/xml/device_description.xml"/>
+</ZoneGroupMember>"""
+other_xml = """
+<ZoneGroupMember UUID="other" ZoneName="Same Room"
+ Location="http://192.0.2.5:1400/xml/device_description.xml"/>"""
+def document(extra=''):
+    return ('<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="primary" '
+            'ID="primary:1">' + primary_xml + extra +
+            '</ZoneGroup></ZoneGroups></ZoneGroupState>')
+state = ZoneGroupState()
+current = [document()]
+calls = [0]
+def poll(speaker):
+    calls[0] += 1
+    if sys.argv[1] == 'changing' and calls[0] == 2:
+        current[0] = document(other_xml)
+    state.process_payload(current[0], source='test', source_ip='192.0.2.2')
+state.process_payload(current[0], source='test', source_ip='192.0.2.2')
+primary = next(iter(state.groups)).coordinator
+with patch.object(soco.SoCo, 'zone_group_state', property(lambda self: state)), \
+     patch.object(state, 'poll', poll):
+    if sys.argv[1] == 'changing':
+        try:
+            topology.validate_announcement_target(primary)
+        except topology.TopologyError:
+            assert state.processed_count == 2
+        else:
+            raise AssertionError('mixed processed observations accepted')
+        print('mixed observations refused')
+    else:
+        plan = topology.validate_announcement_target(primary)
+        assert plan.room_member_uids == frozenset({'primary', 'left', 'right'})
+        assert plan.satellite_parents == frozenset({('left', 'primary'), ('right', 'primary')})
+        assert not plan.detach
+        topology.verify_isolated_target(plan)
+        current[0] = document(other_xml)
+        try:
+            topology.validate_announcement_target(primary)
+        except topology.TopologyError:
+            pass
+        else:
+            raise AssertionError('second logical room accepted')
+        print('owned satellites accepted; same-named second room refused')
+'''
+
+
+class TestInstalledTopologyContracts(unittest.TestCase):
+    def run_contract(self, mode, expected):
+        result = subprocess.run(
+            [sys.executable, '-c', _SDK_TOPOLOGY, mode],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent),
+                 'PYTHONDONTWRITEBYTECODE': '1'},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(expected, result.stdout)
+
+    def test_owned_satellites_and_multiroom_partition_with_real_sdk(self):
+        self.run_contract('stable', 'owned satellites accepted; same-named second room refused')
+
+    def test_new_payload_during_role_reads_fails_closed_with_real_sdk(self):
+        self.run_contract('changing', 'mixed observations refused')
 
 
 if __name__ == "__main__":

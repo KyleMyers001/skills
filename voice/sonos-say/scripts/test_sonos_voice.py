@@ -37,6 +37,7 @@ class ConfiguredTestCase(unittest.TestCase):
                             is_visible=True, is_satellite=False,
                             has_satellites=False)
         speaker.zone_group_state.has_subscriptions = False
+        speaker.zone_group_state.processed_count = 0
         speaker.group = SimpleNamespace(coordinator=speaker, members=[speaker])
         speaker.avTransport.GetMediaInfo.return_value = {"CurrentURI": "prior-uri"}
         discovery = patch("sonos_say.discover_speaker", return_value=speaker)

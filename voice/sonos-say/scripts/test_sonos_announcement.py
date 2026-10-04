@@ -8,7 +8,9 @@ from unittest.mock import patch
 # Existing suite owns its SoCo stub; actual SDK checks run in subprocesses.
 import test_sonos_say
 import sonos_say as say
-from sonos_test_support import FakeSpeaker, FakeSnapshot, TEST_CONFIG
+from sonos_test_support import (
+    FakeSpeaker, FakeSnapshot, TEST_CONFIG, make_bonded_room,
+)
 
 
 _REAL_WAIT = say.wait_for_playback
@@ -28,7 +30,8 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.synth = self.stack.enter_context(patch.object(say, 'synthesise_mp3', side_effect=self.synthesis))
         self.stack.enter_context(patch.object(say, 'Snapshot', side_effect=self.snapshot))
         self.stack.enter_context(patch.object(say, 'serve_file')).return_value.__enter__.return_value = 'http://192.0.2.1/dummy/audio'
-        self.stack.enter_context(patch.object(say, '_TransportEvents', create=True))
+        self.recorder_factory = self.stack.enter_context(
+            patch.object(say, '_TransportEvents', create=True))
         self.wait = self.stack.enter_context(patch.object(say, 'wait_for_playback', return_value=True))
 
     def synthesis(self, text, voice, model, key, path, **kwargs):
@@ -43,6 +46,229 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         coord = FakeSpeaker('coord')
         self.speaker.group = coord.group = SimpleNamespace(coordinator=coord, members=[coord, self.speaker])
         return coord
+
+    def test_bonded_primary_announces_without_group_or_satellite_rpcs(self):
+        primary, satellites = make_bonded_room(self.speaker)
+        original_group = primary.group
+        original_uri, original_state = primary.uri, primary.state
+
+        say.announce('Hello')
+
+        primary.play_uri.assert_called_once()
+        self.assertIs(primary.group, original_group)
+        self.assertEqual((primary.uri, primary.state),
+                         (original_uri, original_state))
+        self.assertEqual(primary.volume, 30)
+        self.assertTrue(primary.mute)
+        for member in (primary, *satellites):
+            member.unjoin.assert_not_called()
+            member.join.assert_not_called()
+        for satellite in satellites:
+            satellite.play_uri.assert_not_called()
+            self.assertIs(satellite._satellite_parent, primary)
+
+    def add_room(self):
+        other = FakeSpeaker('another-room')
+        self.speaker.group.members.append(other)
+        other.group = self.speaker.group
+        return other
+
+    def test_bonded_drift_during_synthesis_refused_before_snapshot(self):
+        make_bonded_room(self.speaker)
+        synth = self.synth.side_effect
+        def regroup(*args, **kwargs):
+            synth(*args, **kwargs)
+            self.add_room()
+        self.synth.side_effect = regroup
+
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+
+        self.assertEqual(raised.exception.code, 'SONOS_TOPOLOGY_FAILED')
+        self.assertEqual(self.snapshots, [])
+        self.speaker.play_uri.assert_not_called()
+        self.assertEqual(self.speaker.volume, 30)
+        self.assertTrue(self.speaker.mute)
+
+    def test_bonded_preplayback_drift_without_mutation_never_restores(self):
+        make_bonded_room(self.speaker)
+        self.recorder_factory.return_value.start.side_effect = self.add_room
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_TOPOLOGY_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.speaker.play_uri.assert_not_called()
+        self.speaker.unjoin.assert_not_called()
+        self.speaker.join.assert_not_called()
+        self.assertTrue(self.speaker.mute)
+
+    def test_bonded_cleanup_drift_avoids_transport_and_recovers_local_state(self):
+        make_bonded_room(self.speaker)
+        def regroup(*args, **kwargs):
+            self.add_room()
+            return True
+        self.wait.side_effect = regroup
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.assertEqual(self.speaker.volume, 30)
+        self.assertTrue(self.speaker.mute)
+        self.speaker.stop.assert_not_called()
+        self.speaker.avTransport.SetAVTransportURI.assert_not_called()
+        self.speaker.unjoin.assert_not_called()
+        self.speaker.join.assert_not_called()
+
+    def test_bonded_cleanup_unavailable_topology_recovers_local_state(self):
+        make_bonded_room(self.speaker)
+        def fail_cache():
+            raise RuntimeError('unavailable')
+        def unavailable(*args, **kwargs):
+            self.speaker.zone_group_state.clear_cache = fail_cache
+            return True
+        self.wait.side_effect = unavailable
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.assertEqual(self.speaker.volume, 30)
+        self.assertTrue(self.speaker.mute)
+
+    def test_bonded_changed_identity_does_not_restore_another_device(self):
+        make_bonded_room(self.speaker)
+        def changed(*args, **kwargs):
+            self.speaker.uid = 'replacement-device'
+            return True
+        self.wait.side_effect = changed
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.assertEqual(self.speaker.volume, 35)
+        self.assertFalse(self.speaker.mute)
+
+    def test_bonded_restoration_rechecks_parent_links(self):
+        primary, satellites = make_bonded_room(self.speaker)
+        restore = FakeSnapshot.restore
+        def change_parent(snapshot, **kwargs):
+            restore(snapshot, **kwargs)
+            satellites[0]._satellite_parent = FakeSpeaker('foreign-primary')
+        with patch.object(FakeSnapshot, 'restore', change_parent):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 1)
+        self.assertEqual(primary.volume, 30)
+        self.assertTrue(primary.mute)
+        primary.unjoin.assert_not_called()
+        primary.join.assert_not_called()
+
+    def test_bonded_success_failure_and_signals_restore_the_original_state(self):
+        primary, satellites = make_bonded_room(self.speaker)
+        original = (primary.uri, primary.state, primary.mute, primary.volume)
+        effects = (True, False, RuntimeError('playback'),
+                   KeyboardInterrupt(), SystemExit(143))
+        for effect in effects:
+            with self.subTest(effect=effect):
+                self.wait.side_effect = (
+                    effect if isinstance(effect, BaseException) else None)
+                self.wait.return_value = effect
+                if effect is True:
+                    say.announce('Hello')
+                else:
+                    with self.assertRaises(BaseException) as raised:
+                        say.announce('Hello')
+                    if isinstance(effect, KeyboardInterrupt):
+                        self.assertIsInstance(raised.exception, KeyboardInterrupt)
+                    elif isinstance(effect, SystemExit):
+                        self.assertEqual(raised.exception.code, 143)
+                    else:
+                        self.assertEqual(raised.exception.code, 'SONOS_PLAYBACK_FAILED')
+                self.assertEqual(
+                    (primary.uri, primary.state, primary.mute, primary.volume),
+                    original,
+                )
+                self.assertEqual(self.snapshots[-1].restores, 1)
+                for satellite in satellites:
+                    self.assertIs(satellite._satellite_parent, primary)
+                    satellite.play_uri.assert_not_called()
+                primary.unjoin.assert_not_called()
+                primary.join.assert_not_called()
+
+    def test_bonded_restore_failure_takes_precedence_over_playback_and_signals(self):
+        make_bonded_room(self.speaker)
+        for effect in (False, KeyboardInterrupt(), SystemExit(143)):
+            with self.subTest(effect=effect):
+                self.wait.side_effect = (
+                    effect if isinstance(effect, BaseException) else None)
+                self.wait.return_value = False
+                with patch.object(FakeSnapshot, 'restore',
+                                  side_effect=RuntimeError('restore')):
+                    with self.assertRaises(say.SonosSayError) as raised:
+                        say.announce('Hello')
+                self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+                self.assertEqual(self.speaker.volume, 30)
+                self.assertTrue(self.speaker.mute)
+
+    def test_bonded_volume_rpc_mutating_then_failing_still_restores(self):
+        make_bonded_room(self.speaker)
+        volume = [30]
+        def setter(value):
+            volume[0] = value
+            if value == 35:
+                raise TimeoutError('volume applied before timeout')
+        with patch.object(FakeSpeaker, 'volume', create=True,
+                          new=property(lambda speaker: volume[0],
+                                       lambda speaker, value: setter(value))):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+            self.assertEqual(raised.exception.code, 'SONOS_PLAYBACK_FAILED')
+            self.assertEqual(self.speaker.volume, 30)
+            self.assertTrue(self.speaker.mute)
+        self.speaker.play_uri.assert_not_called()
+        self.assertEqual(self.snapshots[0].restores, 1)
+
+    def test_bonded_drift_after_restore_prevents_empty_uri_clear(self):
+        primary, satellites = make_bonded_room(self.speaker)
+        primary.uri = ''
+        restore = FakeSnapshot.restore
+        def changed(snapshot, **kwargs):
+            restore(snapshot, **kwargs)
+            satellites[0]._satellite_parent = FakeSpeaker('foreign')
+        with patch.object(FakeSnapshot, 'restore', changed):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        primary.avTransport.SetAVTransportURI.assert_not_called()
+        self.assertEqual(primary.volume, 30)
+        self.assertTrue(primary.mute)
+
+    def test_bonded_mute_restoration_failure_does_not_skip_volume(self):
+        make_bonded_room(self.speaker)
+        mute = [True]
+        def setter(value):
+            if value is True:
+                raise RuntimeError('mute restoration failed')
+            mute[0] = value
+        with patch.object(FakeSpeaker, 'mute', create=True,
+                          new=property(lambda speaker: mute[0],
+                                       lambda speaker, value: setter(value))):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+            self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+            self.assertEqual(self.speaker.volume, 30)
+        self.speaker.join.assert_not_called()
+        self.speaker.unjoin.assert_not_called()
+
+    def test_bonded_cloud_source_refused_before_credentials(self):
+        make_bonded_room(self.speaker)
+        self.speaker.uri = 'x-rincon-queue:target#6'
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_SOURCE_UNSUPPORTED')
+        self.key.assert_not_called()
+        self.synth.assert_not_called()
+        self.assertEqual(self.snapshots, [])
 
     def test_automatic_budget_allows_five_minute_clip(self):
         self.synth.side_effect = lambda *a, **kw: a[4].write_bytes(b'x' * 4800000)

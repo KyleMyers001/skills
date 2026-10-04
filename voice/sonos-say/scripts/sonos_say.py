@@ -64,6 +64,7 @@ from sonos_topology import (  # noqa: E402
     restore_target_group,
     validate_announcement_target,
     verify_isolated_target,
+    verify_target_identity,
 )
 
 # ---------------------------------------------------------------------------
@@ -754,24 +755,55 @@ def _restore_after_announcement(
     original_volume: Optional[int],
     topology,
     topology_mutated: bool,
+    state_mutated: bool = True,
 ) -> tuple[bool, Optional[BaseException]]:
-    """Attempt every restoration once under the caller's cleanup signal guard."""
+    """Attempt safe restoration once under the caller's cleanup signal guard."""
     interrupts: list[BaseException] = []
     restore_failed = False
     uri_cleared = False
+    bonded_room = topology is not None and bool(topology.satellite_parents)
+    if bonded_room and not state_mutated:
+        return False, None  # A read-only refusal creates no recovery obligation.
+
+    local_safe = transport_safe = True
+    if bonded_room:
+        local_safe = _run_cleanup_step(
+            lambda: verify_target_identity(topology), interrupts,
+            "Could not verify target identity for restoration",
+        )
+        transport_safe = local_safe and _run_cleanup_step(
+            lambda: verify_isolated_target(topology), interrupts,
+            "Could not verify bonded room for transport restoration",
+        )
+        restore_failed = not transport_safe
 
     if snapshot_taken and snapshot is not None:
-        restored = _run_cleanup_step(
-            lambda: snapshot.restore(fade=False),
-            interrupts,
-            "Could not restore transport state",
-        )
-        restore_failed = restore_failed or not restored
+        if transport_safe:
+            restored = _run_cleanup_step(
+                lambda: snapshot.restore(fade=False),
+                interrupts,
+                "Could not restore transport state",
+            )
+            restore_failed = restore_failed or not restored
+        if bonded_room:
+            # Snapshot.restore includes transport writes. If those are unsafe
+            # or fail, still recover target-local rendering state independently.
+            local_safe = _run_cleanup_step(
+                lambda: verify_target_identity(topology), interrupts,
+                "Could not verify target identity for local restoration",
+            )
+            restore_failed = restore_failed or not local_safe
+            if local_safe:
+                mute_restored = _run_cleanup_step(
+                    lambda: setattr(speaker, "mute", snapshot.mute), interrupts,
+                    "Could not restore mute",
+                )
+                restore_failed = restore_failed or not mute_restored
 
         saved_uri = getattr(snapshot, "media_uri", None) or ""
         try:
             should_clear = False
-            if not saved_uri and not topology_mutated:
+            if not saved_uri and not topology_mutated and transport_safe:
                 coordinator = speaker.is_coordinator
                 if not isinstance(coordinator, bool):
                     raise RuntimeError("Coordinator state is unavailable")
@@ -783,6 +815,12 @@ def _restore_after_announcement(
         except Exception:
             restore_failed = True
             should_clear = False
+        if should_clear and bonded_room:
+            should_clear = _run_cleanup_step(
+                lambda: verify_isolated_target(topology), interrupts,
+                "Could not verify bonded room before clearing transport",
+            )
+            restore_failed = restore_failed or not should_clear
         if should_clear:
             uri_cleared = _run_cleanup_step(
                 lambda: _clear_temporary_uri(speaker),
@@ -791,7 +829,7 @@ def _restore_after_announcement(
             )
             restore_failed = restore_failed or not uri_cleared
 
-    if original_volume is not None:
+    if original_volume is not None and local_safe:
         volume_restored = _run_cleanup_step(
             lambda: setattr(speaker, "volume", original_volume),
             interrupts,
@@ -807,14 +845,14 @@ def _restore_after_announcement(
         )
         restore_failed = restore_failed or not group_restored
 
-    if snapshot_taken and snapshot is not None:
+    if snapshot_taken and snapshot is not None and local_safe:
         try:
             if speaker.mute != snapshot.mute:
                 raise RuntimeError("Mute mismatch")
             # GetMediaInfo reports queue containers, unlike track-info URI.
             # Regrouping replaces detached transport; do not compare that
             # inherited source to an isolated target's empty snapshot URI.
-            if snapshot.media_uri and not topology_mutated:
+            if snapshot.media_uri and not topology_mutated and transport_safe:
                 media = speaker.avTransport.GetMediaInfo([("InstanceID", 0)])
                 if media["CurrentURI"] != snapshot.media_uri:
                     raise RuntimeError("Source mismatch")
@@ -828,7 +866,7 @@ def _restore_after_announcement(
             log.warning("Could not verify restored mute/source/transport")
             restore_failed = True
 
-    if original_volume is not None:
+    if original_volume is not None and local_safe:
         try:
             if speaker.volume != original_volume:
                 log.warning("Volume mismatch after restore")
@@ -850,6 +888,13 @@ def _restore_after_announcement(
         except Exception:
             log.warning("Could not verify cleared transport URI")
             restore_failed = True
+
+    if bonded_room:
+        topology_restored = _run_cleanup_step(
+            lambda: verify_isolated_target(topology), interrupts,
+            "Could not verify restored bonded room topology",
+        )
+        restore_failed = restore_failed or not topology_restored
 
     pending_interrupt = interrupts[0] if interrupts else None
     return restore_failed, pending_interrupt
@@ -936,6 +981,7 @@ def announce(
     snapshot_taken = False
     original_volume: Optional[int] = None
     topology_mutated = False
+    state_mutated = False
     pending_error: Optional[BaseException] = None
     cleanup_interrupt: Optional[BaseException] = None
     restore_failed = False
@@ -998,7 +1044,9 @@ def announce(
                 if topology.detach:
                     detach_target(topology, before_unjoin=arm_group_recovery)
 
-                # Snapshot only after isolation, when the target owns transport.
+                # Synthesis can outlive a topology change. Recheck ownership
+                # before even capturing state, including an already bonded room.
+                verify_isolated_target(topology)
                 snapshot = Snapshot(speaker)
                 snapshot.snapshot()
                 _check_source_uri(snapshot.media_uri or "")
@@ -1019,6 +1067,8 @@ def announce(
                             snapshot_taken = False
                             original_volume = None
                             raise
+                        # A rendering RPC can apply its change and then fail.
+                        state_mutated = True
                         speaker.volume = volume
                         speaker.mute = False
                         recorder.arm()
@@ -1035,7 +1085,7 @@ def announce(
                 begin_cleanup()
                 restore_failed, cleanup_interrupt = _restore_after_announcement(
                     speaker, snapshot, snapshot_taken, original_volume,
-                    topology, topology_mutated,
+                    topology, topology_mutated, state_mutated=state_mutated,
                 )
     finally:
         signal_guard.restore()
