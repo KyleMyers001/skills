@@ -1,10 +1,19 @@
 import io
 import os
+import http.client
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock
 from contextlib import ExitStack
 from unittest.mock import patch
 
 import airpods_say
+
+_REAL_TTS = airpods_say.stream_tts
+_REAL_KEYCHAIN = airpods_say.get_keychain_password
 
 
 class TestVoiceCli(unittest.TestCase):
@@ -27,8 +36,13 @@ class TestVoiceCli(unittest.TestCase):
         )
         self.tts = stack.enter_context(patch("airpods_say.stream_tts"))
         self.player = stack.enter_context(
-            patch("airpods_say.play_stream", return_value=0)
+            patch("airpods_say.play_stream", side_effect=self._play)
         )
+
+    @staticmethod
+    def _play(**kwargs):
+        kwargs["resp"].close()
+        return 0
 
     def configure(self):
         os.environ.update(
@@ -41,6 +55,48 @@ class TestVoiceCli(unittest.TestCase):
         self.keychain.assert_not_called()
         self.tts.assert_not_called()
         self.player.assert_not_called()
+
+    def test_timeout_reaches_request_and_playback(self):
+        self.configure()
+        self.assertEqual(airpods_say.main(["--timeout", "7", "Hello"]), 0)
+        self.assertEqual(self.tts.call_args.kwargs["timeout"], 7)
+        self.assertEqual(self.player.call_args.kwargs["timeout"], 7)
+
+    def test_raw_request_failures_return_5_without_sensitive_details(self):
+        self.configure()
+        for error in (TimeoutError("dummy-key private-body"),
+                      http.client.RemoteDisconnected("private-body"),
+                      http.client.BadStatusLine("private-body")):
+            with self.subTest(error=type(error).__name__):
+                self.stderr.seek(0)
+                self.stderr.truncate()
+                # Exercise the real normalizer rather than mocking its result.
+                with patch("airpods_say._tts_opener", create=True) as opener, \
+                        patch("urllib.request.urlopen", side_effect=error):
+                    opener.return_value.open.side_effect = error
+                    self.tts.side_effect = _REAL_TTS
+                    self.assertEqual(airpods_say.main(["Hello", "--debug"]), 5)
+                output = self.stderr.getvalue()
+                for value in ("dummy-key", "private-body", "Traceback"):
+                    self.assertNotIn(value, output)
+        self.player.assert_not_called()
+
+    def test_keychain_selectors_and_stderr_are_private(self):
+        self.configure()
+        os.environ.update(ELEVENLABS_KEYCHAIN_SERVICE="service@example.invalid",
+                          ELEVENLABS_KEYCHAIN_ACCOUNT="account@example.invalid")
+        self.keychain.side_effect = _REAL_KEYCHAIN
+        for debug in ([], ["--debug"]):
+            with self.subTest(debug=debug):
+                self.stderr.seek(0)
+                self.stderr.truncate()
+                with patch("airpods_say.subprocess.run", return_value=MagicMock(
+                        returncode=44, stdout="dummy-key", stderr="private-stderr")):
+                    self.assertEqual(airpods_say.main(["Hello"] + debug), 4)
+                for value in ("service@example.invalid", "account@example.invalid",
+                              "dummy-key", "private-stderr"):
+                    self.assertNotIn(value, self.stderr.getvalue())
+        self.tts.assert_not_called()
 
     def test_parser_defaults_to_v4_with_implicit_stability(self):
         args = airpods_say.build_parser().parse_args(["Hello"])
@@ -213,3 +269,28 @@ class TestVoiceCli(unittest.TestCase):
         help_text = airpods_say.build_parser().format_help()
 
         self.assertNotIn("private-voice-example", help_text)
+
+
+class TestSymlinkInstallation(unittest.TestCase):
+    def test_both_consumers_find_checkout_policy_from_a_lone_skill_symlink(self):
+        voice_dir = Path(airpods_say.__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Optional SoCo must not be required for this import-path test.
+            stub = root / "soco"
+            stub.mkdir()
+            (stub / "__init__.py").write_text("class SoCo: pass\n")
+            (stub / "snapshot.py").write_text("class Snapshot: pass\n")
+            for skill, script in (("airpods-say", "airpods_say.py"),
+                                  ("sonos-say", "sonos_say.py")):
+                with self.subTest(skill=skill):
+                    installed = root / "installed" / skill
+                    installed.parent.mkdir(exist_ok=True)
+                    installed.symlink_to(voice_dir / skill, target_is_directory=True)
+                    result = subprocess.run(
+                        [sys.executable, str(installed / "scripts" / script), "--help"],
+                        cwd=root, env={"PATH": os.defpath, "PYTHONPATH": str(root)},
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("--voice-id", result.stdout)

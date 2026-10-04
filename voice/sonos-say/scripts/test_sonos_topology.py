@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import sonos_topology as topology
 
@@ -15,6 +15,7 @@ def _speaker(uid: str) -> MagicMock:
     speaker.is_satellite = False
     speaker.has_satellites = False
     speaker.is_visible = True
+    speaker.zone_group_state.has_subscriptions = False
     return speaker
 
 
@@ -232,6 +233,163 @@ class TestTopologyLifecycle(unittest.TestCase):
 
         with self.assertRaises(topology.TopologyError):
             topology.restore_target_group(plan, timeout=0)
+
+
+class _Household:
+    """SoCo's shared five-second polling cache, independent of live state."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.live = {}
+        self.cached = {}
+        self.cache_until = -1.0
+        self.has_subscriptions = False
+        self.samples = 0
+        self.on_sleep = None
+
+    def clear_cache(self):
+        self.cache_until = -1.0
+
+    def group(self, uid):
+        if not self.has_subscriptions and self.now >= self.cache_until:
+            self.cached = dict(self.live)
+            self.cache_until = self.now + 5
+            self.samples += 1
+        return self.cached[uid]
+
+    def group_members(self, coordinator, members):
+        group = SimpleNamespace(coordinator=coordinator, members=members)
+        for member in members:
+            self.live[member.uid] = group
+
+    def sleep(self, seconds):
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep()
+
+
+class _CachedSpeaker:
+    is_satellite = False
+    has_satellites = False
+    is_visible = True
+
+    def __init__(self, uid, household):
+        self.uid = uid
+        self.zone_group_state = household
+        self.unjoin = MagicMock()
+        self.join = MagicMock()
+
+    @property
+    def group(self):
+        return self.zone_group_state.group(self.uid)
+
+
+class TestFreshTopology(unittest.TestCase):
+    def setUp(self):
+        self.household = _Household()
+        self.target = _CachedSpeaker("target", self.household)
+        self.coord = _CachedSpeaker("coord", self.household)
+        self.household.group_members(self.coord, [self.coord, self.target])
+        clock = patch("sonos_topology.time.monotonic",
+                      side_effect=lambda: self.household.now)
+        sleep = patch("sonos_topology.time.sleep", self.household.sleep)
+        clock.start()
+        sleep.start()
+        self.addCleanup(clock.stop)
+        self.addCleanup(sleep.stop)
+
+    def isolate(self):
+        self.household.group_members(self.coord, [self.coord])
+        self.household.group_members(self.target, [self.target])
+
+    def test_fake_really_retains_stale_data_until_invalidated(self):
+        original = self.target.group
+        self.isolate()
+        self.household.now += 0.1
+        self.assertIs(self.target.group, original)
+        self.household.clear_cache()
+        self.assertIs(self.target.group.coordinator, self.target)
+
+    def test_delayed_detach_and_rejoin_converge_before_cache_expiry(self):
+        plan = topology.validate_announcement_target(self.target)
+        # RPC invalidates once, like SoCo. First observation remains stale;
+        # later polling must invalidate again to see delayed publication.
+        self.target.unjoin.side_effect = self.household.clear_cache
+        self.household.on_sleep = self.isolate
+        topology.detach_target(plan)
+        self.assertLess(self.household.now, 5)
+        self.target.join.side_effect = lambda prior: self.household.clear_cache()
+        self.household.on_sleep = lambda: self.household.group_members(
+            self.coord, [self.coord, self.target])
+        topology.restore_target_group(plan)
+        self.assertLess(self.household.now, 5)
+        self.target.join.assert_called_once_with(self.coord)
+        self.assertEqual(topology.inspect_topology(self.target).member_uids,
+                         frozenset({"target", "coord"}))
+
+    def test_external_regrouping_is_observed_before_playback(self):
+        self.isolate()
+        plan = topology.validate_announcement_target(self.target)
+        self.household.group_members(self.coord, [self.coord, self.target])
+        with self.assertRaises(topology.TopologyError):
+            topology.verify_isolated_target(plan)
+
+    def test_coordinator_restoration_check_does_not_accept_stale_membership(self):
+        plan = topology.validate_announcement_target(self.target)
+        self.isolate()
+        self.household.clear_cache()
+        topology.inspect_topology(self.coord)  # prime singleton coordinator view
+        intruder = _CachedSpeaker("intruder", self.household)
+        self.household.group_members(self.coord, [self.coord, intruder])
+        with self.assertRaises(topology.TopologyError):
+            topology.restore_target_group(plan, timeout=0)
+        self.target.join.assert_not_called()
+
+    def test_active_subscription_fails_closed(self):
+        self.target.group  # prime an apparently valid view
+        self.household.has_subscriptions = True
+        with self.assertRaises(topology.TopologyError):
+            topology.validate_announcement_target(self.target)
+        self.target.unjoin.assert_not_called()
+
+    def test_cache_clear_and_network_read_errors_fail_closed(self):
+        for method in ("clear_cache", "group"):
+            with self.subTest(method=method):
+                with patch.object(self.household, method,
+                                  side_effect=RuntimeError("unavailable")):
+                    with self.assertRaises(topology.TopologyError):
+                        topology.inspect_topology(self.target)
+
+    def test_eligibility_uses_the_same_sampled_group(self):
+        with patch.object(type(self.target), "group",
+                          new_callable=PropertyMock) as group:
+            group.side_effect = [self.household.live["target"],
+                                 RuntimeError("second read")]
+            topology.validate_announcement_target(self.target)
+            self.assertEqual(group.call_count, 1)
+
+    def test_before_unjoin_only_runs_after_fresh_validation(self):
+        plan = topology.validate_announcement_target(self.target)
+        self.isolate()  # another controller changed it
+        callback = MagicMock()
+        with self.assertRaises(topology.TopologyError):
+            topology.detach_target(plan, before_unjoin=callback)
+        callback.assert_not_called()
+        self.target.unjoin.assert_not_called()
+
+    def test_mutation_callback_runs_before_rpc_that_mutates_then_raises(self):
+        plan = topology.validate_announcement_target(self.target)
+        attempted = []
+
+        def unjoin():
+            self.assertEqual(attempted, [True])
+            self.isolate()
+            raise TimeoutError("RPC timed out after mutation")
+
+        self.target.unjoin.side_effect = unjoin
+        with self.assertRaises(topology.TopologyError):
+            topology.detach_target(plan, before_unjoin=lambda: attempted.append(True))
+        self.assertIs(self.household.live["target"].coordinator, self.target)
 
 
 if __name__ == "__main__":

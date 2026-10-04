@@ -11,8 +11,9 @@ description: >-
 ## Prerequisites
 
 - Python 3 and SoCo (`python3 -m pip install soco` if installation is approved).
-- Deploy `elevenlabs-voice-policy` alongside this skill; its
-  `scripts/elevenlabs_voice.py` provides the model/stability policy.
+- For copied installations, deploy `elevenlabs-voice-policy` alongside this
+  skill. A whole-skill symlink resolves shared policy in its real checkout;
+  no separate policy symlink is needed.
 - A reachable, supported Sonos speaker on a trusted LAN.
 - Set `ELEVENLABS_VOICE_ID` to the user's own voice ID and `SONOS_ROOM` to their
   intended room. `--voice-id` and `--room` override these values; neither has a
@@ -69,8 +70,11 @@ positive (default: 120 seconds). `--help` requires no configuration.
 - A grouped coordinator is refused: room-targeted speech must not broadcast to
   its group. A grouped non-coordinator is isolated, then rejoined to its exact
   prior group. Bonded, hidden, malformed, or unavailable topology is refused.
-- Synthesis finishes before any group mutation. The script rechecks isolation
-  before playback; concurrent changes from other controllers remain a risk.
+- Read-only discovery and fresh topology validation precede Keychain lookup
+  (bounded to 10 seconds) and synthesis. Synthesis finishes before any group
+  mutation. Independent safety observations invalidate SoCo's polling cache;
+  active topology subscriptions are unsupported and fail closed. Isolation is
+  rechecked before playback; concurrent controllers remain a risk.
 - TTS redirects are refused before a second request. Never expose keys or
   provider error bodies, and never put the API key in arguments or workspace files.
 - Temporary audio uses a fresh random URL restricted to the target speaker's IP.
@@ -78,9 +82,11 @@ positive (default: 120 seconds). `--help` requires no configuration.
   untrusted LAN. Temporary audio and the server are cleaned up after use.
 - Playback must reach PLAYING and then STOPPED within the deadline. Missing
   telemetry, pausing, non-start, and timeout are failures, not success.
-- Cleanup attempts transport, URI, volume, and group restoration on failure and
-  SIGINT/SIGTERM. Restoration failure takes precedence over playback errors or
-  interrupts. State restoration is not frame-accurate.
+- Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
+  deletion. Cleanup attempts captured transport, URI, volume, and group
+  restoration; group recovery is armed only at a validated unjoin RPC attempt.
+  Restoration failure takes precedence over playback errors or interrupts.
+  State restoration is not frame-accurate.
 
 On exit 0, briefly report playback completion and successful cleanup. On failure,
 report only the fixed `SONOS_SAY_ERROR` code. `SONOS_RESTORE_FAILED` means the room

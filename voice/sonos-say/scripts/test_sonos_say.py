@@ -92,6 +92,7 @@ def _set_standalone(sp: MagicMock) -> MagicMock:
     sp.is_satellite = False
     sp.has_satellites = False
     sp.is_visible = True
+    sp.zone_group_state.has_subscriptions = False
     sp.is_coordinator = True
     sp.group = SimpleNamespace(coordinator=sp, members=[sp])
     return sp
@@ -353,9 +354,9 @@ class TestGetApiKey(unittest.TestCase):
                 "sk-testkey",
             )
             mr.assert_called_once_with(
-                ["security", "find-generic-password", "-s", "test-service",
+                ["/usr/bin/security", "find-generic-password", "-s", "test-service",
                  "-a", "test-account", "-w"],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=True, timeout=10,
             )
 
     def test_empty_result_raises(self):
@@ -363,6 +364,17 @@ class TestGetApiKey(unittest.TestCase):
             mr.return_value = MagicMock(stdout="   \n")
             with self.assertRaises(RuntimeError):
                 sonos_say.get_api_key("test-service", "test-account")
+
+    def test_timeout_and_missing_binary_are_sanitized(self):
+        for error in (subprocess.TimeoutExpired("private-selector", 10),
+                      FileNotFoundError("private-selector")):
+            with self.subTest(error=type(error).__name__):
+                with patch("subprocess.run", side_effect=error):
+                    with self.assertRaises(RuntimeError) as raised:
+                        sonos_say.get_api_key("service@example.invalid",
+                                              "account@example.invalid")
+                self.assertNotIn("private-selector", str(raised.exception))
+                self.assertNotIn("example.invalid", str(raised.exception))
 
     def test_subprocess_error_raises(self):
         with patch("subprocess.run") as mr:
@@ -504,7 +516,6 @@ class TestAnnounceOrchestration(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -547,7 +558,6 @@ class TestAnnounceOrchestration(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -577,7 +587,6 @@ class TestAnnounceOrchestration(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -608,7 +617,6 @@ class TestAnnounceOrchestration(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -641,6 +649,8 @@ class TestGroupedAnnouncement(unittest.TestCase):
         coordinator.is_satellite = False
         coordinator.has_satellites = False
         coordinator.is_visible = True
+        target.zone_group_state.has_subscriptions = False
+        coordinator.zone_group_state.has_subscriptions = False
         target.ip_address = "192.168.1.50"
         target.volume = 30
 
@@ -688,7 +698,6 @@ class TestGroupedAnnouncement(unittest.TestCase):
             ),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as snapshot_type,
-            patch("sonos_say._install_sigterm_handler"),
             patch(
                 "sonos_say.wait_for_playback",
                 side_effect=wait_effect
@@ -788,8 +797,8 @@ class TestGroupedAnnouncement(unittest.TestCase):
                 "sonos_say.synthesise_mp3",
                 side_effect=RuntimeError("API body"),
             ),
-            patch("sonos_say.discover_speaker") as discover,
-            patch("sonos_say._install_sigterm_handler"),
+            patch("sonos_say.discover_speaker", return_value=target) as discover,
+            patch("sonos_say.local_ip_toward", return_value="192.0.2.1"),
         ):
             with self.assertRaises(sonos_say.SonosSayError) as raised:
                 sonos_say.announce("Hello", room="Target", volume=35)
@@ -798,8 +807,91 @@ class TestGroupedAnnouncement(unittest.TestCase):
             raised.exception.code,
             "ELEVENLABS_SYNTHESIS_FAILED",
         )
-        discover.assert_not_called()
+        discover.assert_called_once_with("Target")
         target.unjoin.assert_not_called()
+        target.join.assert_not_called()
+
+    def test_precondition_drift_does_not_arm_recovery(self):
+        _, events, target = self._grouped_speakers()
+        other = _set_standalone(MagicMock())
+        other.uid = "other"
+
+        def regroup(*args, **kwargs):
+            group = SimpleNamespace(coordinator=other, members=[other, target])
+            target.group = other.group = group
+
+        with patch("sonos_say.restore_target_group") as restore:
+            with self.assertRaises(sonos_say.SonosSayError) as raised:
+                self._announce(target, synthesise_effect=regroup)
+        self.assertEqual(raised.exception.code, "SONOS_TOPOLOGY_FAILED")
+        self.assertEqual(events, [])
+        target.unjoin.assert_not_called()
+        target.join.assert_not_called()
+        restore.assert_not_called()
+
+    def test_rpc_mutation_then_timeout_still_restores_group(self):
+        coordinator, events, target = self._grouped_speakers()
+        isolate = target.unjoin.side_effect
+
+        def mutate_then_timeout():
+            isolate()
+            raise TimeoutError("timed out after applying mutation")
+
+        target.unjoin.side_effect = mutate_then_timeout
+        with self.assertRaises(sonos_say.SonosSayError) as raised:
+            self._announce(target)
+        self.assertEqual(raised.exception.code, "SONOS_TOPOLOGY_FAILED")
+        self.assertEqual(events, ["detach", "rejoin"])
+        target.join.assert_called_once_with(coordinator)
+
+    def test_read_only_preflight_precedes_keychain_and_synthesis(self):
+        _, events, target = self._grouped_speakers()
+        validate = sonos_say.validate_announcement_target
+
+        def discovery(room):
+            events.append("discover")
+            return target
+
+        def validation(speaker):
+            events.append("validate")
+            return validate(speaker)
+
+        with patch("sonos_say.discover_speaker", side_effect=discovery), \
+                patch("sonos_say.validate_announcement_target", side_effect=validation):
+            # _announce's discovery patch would mask ordering; run full pipeline.
+            with patch("sonos_say.get_api_key", side_effect=lambda *a:
+                       events.append("key") or "dummy-key"), \
+                    patch("sonos_say.synthesise_mp3", side_effect=lambda *a, **kw:
+                          events.append("synth")), \
+                    patch("sonos_say.local_ip_toward", return_value="192.0.2.1"), \
+                    patch("sonos_say.serve_file") as serve, \
+                    patch("sonos_say.Snapshot") as snapshot, \
+                    patch("sonos_say.wait_for_playback", return_value=True):
+                serve.return_value.__enter__.return_value = "http://192.0.2.1/audio"
+                snapshot.return_value.media_uri = "prior-uri"
+                target.play_uri.side_effect = lambda *a, **kw: events.append("play")
+                sonos_say.announce("Hello")
+        self.assertEqual(events[:6], ["discover", "validate", "key", "synth",
+                                     "detach", "play"])
+
+    def test_invalid_room_or_topology_never_accesses_credentials(self):
+        for phase in ("missing", "ambiguous", "topology"):
+            with self.subTest(phase=phase):
+                coord, _, target = self._grouped_speakers()
+                speaker = coord if phase == "topology" else target
+                with patch("sonos_say.discover_speaker", return_value=speaker,
+                           side_effect=None if phase == "topology" else
+                           RuntimeError(phase)), \
+                        patch("sonos_say.local_ip_toward", return_value="192.0.2.1"), \
+                        patch("sonos_say.get_api_key") as key, \
+                        patch("sonos_say.synthesise_mp3") as synth, \
+                        patch("sonos_say.serve_file") as serve:
+                    with self.assertRaises(sonos_say.SonosSayError) as raised:
+                        sonos_say.announce("Hello")
+                self.assertEqual(raised.exception.code, "SONOS_TOPOLOGY_FAILED"
+                                 if phase == "topology" else "SONOS_DISCOVERY_FAILED")
+                for operation in (key, synth, serve, target.unjoin, target.join):
+                    operation.assert_not_called()
 
     def test_play_failure_still_rejoins(self):
         coordinator, events, target = self._grouped_speakers()
@@ -1036,18 +1128,20 @@ class TestSigtermHandling(unittest.TestCase):
 
     def test_sigterm_raises_system_exit_143(self):
         """
-        After _install_sigterm_handler(), sending SIGTERM to the current
-        process via os.kill should raise SystemExit(143).
+        The scoped guard converts SIGTERM to SystemExit(143) and restores
+        the original handler, without installing a permanent global helper.
         """
         import os
 
-        sonos_say._install_sigterm_handler()
+        guard = sonos_say._MutationSignalGuard()
+        prior = signal.getsignal(signal.SIGTERM)
+        guard.install()
         try:
             with self.assertRaises(SystemExit) as cm:
                 os.kill(os.getpid(), signal.SIGTERM)
         finally:
-            # Restore default so other tests aren't affected
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            guard.restore()
+        self.assertIs(signal.getsignal(signal.SIGTERM), prior)
 
         self.assertEqual(cm.exception.code, 143)
 
@@ -1071,7 +1165,6 @@ class TestSigtermHandling(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1107,7 +1200,6 @@ class TestSigtermHandling(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1141,7 +1233,6 @@ class TestSigtermHandling(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1556,7 +1647,6 @@ class TestRestoreOrderingAndFade(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -1641,7 +1731,6 @@ class TestEmptyUriClearing(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(
@@ -1732,7 +1821,6 @@ class TestEmptyUriClearing(unittest.TestCase):
                 patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
                 patch("sonos_say.serve_file") as mock_serve,
                 patch("sonos_say.Snapshot") as MockSnapshot,
-                patch("sonos_say._install_sigterm_handler"),
                 patch("time.sleep"),
             ):
                 mock_serve.return_value.__enter__ = MagicMock(
@@ -1796,7 +1884,6 @@ class TestInterruptCleanupOrdering(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("sonos_say.wait_for_playback", side_effect=_fake_wait),
             patch("time.sleep"),
         ):
@@ -1852,7 +1939,6 @@ class TestInterruptCleanupOrdering(unittest.TestCase):
             patch("sonos_say.local_ip_toward", return_value="192.168.1.10"),
             patch("sonos_say.serve_file") as mock_serve,
             patch("sonos_say.Snapshot") as MockSnapshot,
-            patch("sonos_say._install_sigterm_handler"),
             patch("time.sleep"),
         ):
             mock_serve.return_value.__enter__ = MagicMock(

@@ -25,23 +25,25 @@ import http.client
 import json
 import os
 import re
-import select
+import queue
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
-_POLICY_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "elevenlabs-voice-policy",
-    "scripts",
+_POLICY_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "elevenlabs-voice-policy"
+    / "scripts"
 )
-if _POLICY_DIR not in sys.path:
-    sys.path.insert(0, _POLICY_DIR)
+if str(_POLICY_DIR) not in sys.path:
+    sys.path.insert(0, str(_POLICY_DIR))
 
 from elevenlabs_voice import (  # noqa: E402
     DEFAULT_MODEL_ID,
@@ -394,8 +396,7 @@ def get_keychain_password(service: str, account: str) -> str:
         # Don't expose stderr (may contain partial key info)
         raise KeychainError(
             f"Keychain lookup failed (exit {result.returncode}). "
-            "Check that the item exists: "
-            f"service='{service}' account='{account}'"
+            "Check ELEVENLABS_KEYCHAIN_SERVICE and ELEVENLABS_KEYCHAIN_ACCOUNT."
         )
     key = result.stdout.strip()
     if not key:
@@ -547,6 +548,16 @@ class ElevenLabsError(Exception):
     pass
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", {}, fp)
+
+
+def _tts_opener():
+    """Private request boundary: never forward credentials on redirects."""
+    return urllib.request.build_opener(_RejectRedirects())
+
+
 def stream_tts(
     api_key: str,
     text: str,
@@ -563,12 +574,11 @@ def stream_tts(
 
     Raises ElevenLabsError on non-200 or connectivity failure.
     """
-    url = ELEVENLABS_STREAM_URL.format(voice_id=urllib.parse.quote(voice_id))
-    payload_data = {
-        "text": text,
-        "model_id": model_id,
-        "output_format": output_format,
-    }
+    url = (
+        ELEVENLABS_STREAM_URL.format(voice_id=urllib.parse.quote(voice_id, safe=""))
+        + "?" + urllib.parse.urlencode({"output_format": output_format})
+    )
+    payload_data = {"text": text, "model_id": model_id}
     if stability is not None:
         payload_data["voice_settings"] = {
             "stability": stability.value,
@@ -590,14 +600,15 @@ def stream_tts(
         print(f"[debug] POST {url}", file=sys.stderr)
 
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)  # blocks until headers received
+        resp = _tts_opener().open(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
-        # Do NOT log exc.read() — could expose server-generated content
-        raise ElevenLabsError(
-            f"ElevenLabs API returned HTTP {exc.code}: {exc.reason}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise ElevenLabsError(f"ElevenLabs request failed: {exc.reason}") from exc
+        exc.close()
+        # Provider-controlled reasons, bodies, and destinations are private.
+        raise ElevenLabsError(f"ElevenLabs API returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise ElevenLabsError("ElevenLabs request failed") from None
+    except (OSError, http.client.HTTPException):
+        raise ElevenLabsError("ElevenLabs request failed") from None
 
     return resp
 
@@ -621,7 +632,7 @@ def _drain_ffplay(
     (in fail-closed priority order):
 
       1. device_changed set  → terminate ffplay, return 3.
-      2. proc.poll() != None → ffplay exited naturally; return 0.
+      2. proc.poll() != None → success only for exit 0, otherwise failure 1.
       3. Safety deadline hit → kill hung player; return 1 (not success).
 
     Safety timeout is duration-aware:
@@ -668,9 +679,14 @@ def _drain_ffplay(
                 proc.kill()
             return 3
 
-        # Natural exit: playback complete.
-        if proc.poll() is not None:
-            return 0
+        status = proc.poll()
+        if status is not None:
+            if device_changed.is_set():
+                return 3
+            if status == 0:
+                return 0
+            print("Playback error: ffplay failed during drain.", file=sys.stderr)
+            return 1
 
         # Safety deadline: kill hung player, report non-success.
         if time.monotonic() >= deadline:
@@ -689,6 +705,78 @@ def _drain_ffplay(
 # Playback with mid-stream device monitoring
 # ---------------------------------------------------------------------------
 
+class _StreamReader:
+    """One HTTPResponse owner; bounded buffering and cancellable blocking reads."""
+
+    def __init__(self, resp: http.client.HTTPResponse) -> None:
+        self.resp = resp
+        self.chunks = queue.Queue(maxsize=8)
+        self.cancelled = threading.Event()
+        self.done = threading.Event()
+        self.failed = False
+        # Capture before read1 can set fp=None. shutdown wakes a socket read
+        # without acquiring BufferedReader's lock; only the worker closes resp.
+        raw = getattr(getattr(resp, "fp", None), "raw", None)
+        self.socket = getattr(raw, "_sock", None)
+        self.thread = threading.Thread(
+            target=self._read, name="airpods-stream-reader", daemon=True,
+        )
+
+    def _read(self) -> None:
+        try:
+            while not self.cancelled.is_set():
+                chunk = _read_chunk(self.resp, STREAM_CHUNK)
+                if not chunk:
+                    remaining = getattr(self.resp, "length", None)
+                    if isinstance(remaining, int) and remaining > 0:
+                        raise http.client.HTTPException("incomplete response")
+                    break
+                while not self.cancelled.is_set():
+                    try:
+                        self.chunks.put(chunk, timeout=0.05)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception:
+            # Never let worker failures disappear into a thread traceback or
+            # turn into clean EOF; the consumer emits a fixed diagnostic.
+            self.failed = True
+        finally:
+            try:
+                self.resp.close()
+            except Exception:
+                self.failed = True
+            finally:
+                # EOF/errors cannot get stranded behind a full queue sentinel.
+                self.done.set()
+
+    def stop(self) -> None:
+        self.cancelled.set()
+        if self.socket is not None:
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        if self.thread.ident is not None:
+            self.thread.join(timeout=1)
+        else:
+            self.resp.close()
+
+
+def _stop_ffplay(proc) -> None:
+    """Terminate/kill and reap with finite waits, including failed drains."""
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def play_stream(
     resp: http.client.HTTPResponse,
     ffplay_path: str,
@@ -696,16 +784,16 @@ def play_stream(
     debug: bool,
     poll_interval: float = 2.0,
     timing: Optional["_Timing"] = None,
+    timeout: float = 30,
 ) -> int:
     """
-    Pipe the HTTP response body into ffplay.
+    Pipe the HTTP response body into ffplay, owning response closure.
     Monitors the default output device every `poll_interval` seconds;
     terminates ffplay immediately if the device changes.
 
-    Reads are done via _read_chunk() which prefers read1(STREAM_CHUNK) for
-    genuinely incremental delivery — returning whatever bytes are in the OS
-    buffer rather than blocking until STREAM_CHUNK bytes arrive.  Falls back
-    to read(STREAM_CHUNK) when read1 is unavailable.
+    A blocking HTTPResponse.read1() worker decodes framing and forwards audio
+    through a bounded queue. The consumer enforces body-data inactivity while
+    monitoring device/player state. Queue pressure is not a network timeout.
 
     After the HTTP stream reaches EOF, stdin is closed and _drain_ffplay() is
     called to let ffplay play out its buffer naturally.  _drain_ffplay() uses
@@ -714,8 +802,9 @@ def play_stream(
 
     Returns an exit code:
         0  - playback completed (stream + drain both succeeded)
-        1  - drain safety timeout exceeded (ffplay killed — not success)
+        1  - player failure or drain safety timeout
         3  - device changed/disconnected mid-playback or during drain
+        5  - body-network failure or inactivity timeout
     """
     ffplay_cmd = [
         ffplay_path,
@@ -731,13 +820,19 @@ def play_stream(
     # Use caller-supplied timing context or create a no-op one.
     _t = timing if timing is not None else _Timing(enabled=debug)
 
-    proc = subprocess.Popen(
-        ffplay_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=None if debug else subprocess.DEVNULL,
-    )
+    try:
+        proc = subprocess.Popen(
+            ffplay_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=None if debug else subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except BaseException:
+        resp.close()
+        raise
 
+    reader = _StreamReader(resp)
     _t.mark("ffplay-start")
 
     # Signal handling: forward SIGINT/SIGTERM to ffplay.
@@ -753,13 +848,12 @@ def play_stream(
     # Device monitor in a background thread.
     # Performs an immediate check first, then waits between subsequent polls.
     device_changed = threading.Event()
+    monitor_stop = threading.Event()
 
     def _monitor_device():
         # Immediate check before the first sleep so a pre-existing change is
         # caught without waiting a full poll_interval.
-        while True:
-            if device_changed.is_set():
-                break
+        while not monitor_stop.is_set():
             try:
                 current = get_default_output_device_name()
             except CoreAudioError:
@@ -770,10 +864,9 @@ def play_stream(
                 device_changed.set()
                 break
             # Wait before next poll; exit early if main loop signals done.
-            device_changed.wait(poll_interval)
+            monitor_stop.wait(poll_interval)
 
     monitor_thread = threading.Thread(target=_monitor_device, daemon=True)
-    monitor_thread.start()
 
     first_audio_received = False
     first_bytes_written = False
@@ -793,6 +886,12 @@ def play_stream(
                 pass
 
     try:
+        # Unbuffered, nonblocking stdin keeps a stalled player from preventing
+        # device checks, cancellation, or a bounded close of the player's pipe.
+        os.set_blocking(proc.stdin.fileno(), False)
+        reader.thread.start()
+        monitor_thread.start()
+        last_audio = time.monotonic()
         while True:
             # Check device change
             if device_changed.is_set():
@@ -826,54 +925,32 @@ def play_stream(
                     exit_code = 1
                 break
 
-            # Read a chunk from the HTTP stream with a short timeout.
-            # Guard against resp.fp being None (http.client sets fp=None
-            # after EOF/connection close). Calling select.select on such a
-            # response raises AttributeError because fileno() cannot
-            # delegate to a None fp.  When fp is None the stream is already
-            # exhausted, so fall straight through to the read() call which
-            # will return b"" cleanly.
-            chunk = None
             try:
-                fp_closed = getattr(resp, "fp", None) is None
-                if not fp_closed:
-                    # Use select to avoid blocking indefinitely
-                    rlist, _, _ = select.select([resp], [], [], poll_interval)
-                    if rlist:
-                        chunk = _read_chunk(resp, STREAM_CHUNK)
-                else:
-                    # fp already None — stream is exhausted; read returns b""
-                    chunk = resp.read(STREAM_CHUNK)
-            except (OSError, AttributeError) as _exc:
-                # OSError: underlying socket gone mid-stream.
-                # AttributeError: fp became None between the guard check and
-                # the select() call (TOCTOU race on http.client EOF).
-                #
-                # Fail-closed: honour device_changed first so a concurrent
-                # device switch is reported as exit 3 rather than exit 1.
+                chunk = reader.chunks.get(timeout=0.05)
+                last_audio = time.monotonic()
+            except queue.Empty:
                 if device_changed.is_set():
-                    print(
-                        "AirPods output changed or disconnected mid-playback. Stopping.",
-                        file=sys.stderr,
-                    )
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
                     exit_code = 3
+                    break
+                if reader.done.is_set():
+                    # A producer can enqueue its last bytes between get's
+                    # timeout and this done check. Once done, no more puts can
+                    # occur: check the queue again before declaring EOF/error.
+                    try:
+                        chunk = reader.chunks.get_nowait()
+                        last_audio = time.monotonic()
+                    except queue.Empty:
+                        if reader.failed:
+                            print("ElevenLabs stream read failed.", file=sys.stderr)
+                            exit_code = 5
+                            break
+                        chunk = b""
+                elif time.monotonic() - last_audio >= timeout:
+                    print("ElevenLabs stream inactivity timeout.", file=sys.stderr)
+                    exit_code = 5
+                    break
                 else:
-                    # Network / select error before clean EOF — not silent success.
-                    print(
-                        "Playback error: stream read failed before EOF.",
-                        file=sys.stderr,
-                    )
-                    exit_code = 1
-                break
-
-            if chunk is None:
-                # No data yet (select timeout); loop to check device
-                continue
+                    continue
 
             if not chunk:
                 _t.mark("stream-eof")
@@ -908,10 +985,26 @@ def play_stream(
                 if not first_bytes_written:
                     _t.mark("first-bytes-to-ffplay")
                     first_bytes_written = True
-                proc.stdin.write(chunk)
+                offset = 0
+                while offset < len(chunk):
+                    if device_changed.is_set():
+                        exit_code = 3
+                        break
+                    if proc.poll() is not None:
+                        raise BrokenPipeError()
+                    written = proc.stdin.write(chunk[offset:])
+                    if written:
+                        offset += written
+                        bytes_written += written
+                    else:
+                        monitor_stop.wait(0.05)
                 proc.stdin.flush()
-                bytes_written += len(chunk)
-            except BrokenPipeError:
+                # Time spent delivering queued audio is backpressure, not a
+                # period of waiting for server data.
+                last_audio = time.monotonic()
+                if exit_code:
+                    break
+            except OSError:
                 # Device change takes priority: if the device change caused
                 # ffplay to be killed (breaking the pipe), report exit 3.
                 if device_changed.is_set():
@@ -929,27 +1022,19 @@ def play_stream(
                 break
 
     finally:
-        # Signal monitor to stop and wait for it.
-        # _drain_ffplay() (when called) lives in the try block and completes
-        # before finally runs, so device_changed.set() here is always safe —
-        # it just unblocks any residual wait inside the monitor thread.
-        device_changed.set()
-        monitor_thread.join(timeout=3)
+        if device_changed.is_set():
+            exit_code = 3
+        monitor_stop.set()
+        reader.stop()
+        if monitor_thread.ident is not None:
+            monitor_thread.join(timeout=3)
 
         # Restore original signal handlers.
         signal.signal(signal.SIGINT,  prior_sigint)
         signal.signal(signal.SIGTERM, prior_sigterm)
 
-        # Close stdin if not already done.  Covers device-change, BrokenPipe,
-        # and other early-exit paths that bypassed the normal EOF drain.
+        _stop_ffplay(proc)
         _close_stdin_safe()
-
-        # Kill if still alive.  After a successful drain, proc is already
-        # done.  For all other exit paths (device change, broken pipe, etc.)
-        # ffplay was already terminated/killed in the loop body; proc.kill()
-        # on an already-dead process is a no-op on POSIX.
-        if proc.poll() is None:
-            proc.kill()
 
         _t.mark("ffplay-done")
         if debug:
@@ -996,7 +1081,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=int,
         default=30,
-        help="HTTP request timeout in seconds, must be > 0 (default: 30)",
+        help=("Request/header and body-data inactivity timeout in seconds, "
+              "must be > 0 (default: 30)"),
     )
     p.add_argument(
         "--dry-run",
@@ -1168,19 +1254,15 @@ def main(argv: Optional[list] = None) -> int:
 
     t.mark("headers-received")
 
-    # --- Play ---
-    try:
-        exit_code = play_stream(
-            resp=resp,
-            ffplay_path=ffplay_path,
-            expected_device_name=device_name_2,
-            debug=args.debug,
-            timing=t,
-        )
-    finally:
-        resp.close()
-
-    return exit_code
+    # Playback owns response closure; never close it concurrently with a read.
+    return play_stream(
+        resp=resp,
+        ffplay_path=ffplay_path,
+        expected_device_name=device_name_2,
+        debug=args.debug,
+        timing=t,
+        timeout=args.timeout,
+    )
 
 
 if __name__ == "__main__":

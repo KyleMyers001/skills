@@ -3,13 +3,13 @@
 sonos-say — TTS announcement to a Sonos speaker via ElevenLabs + SoCo.
 
 Pipeline:
-  1. Fetch ElevenLabs API key from macOS Keychain
-  2. Synthesise text → temp MP3 via ElevenLabs REST API
-  3. Discover target Sonos speaker via multicast UPnP
-  4. Snapshot current transport state + volume
-  5. Spin up a short-lived local HTTP server to serve the MP3
-  6. Issue Sonos play_uri, wait for completion (or timeout)
-  7. Restore state + volume, stop server, delete temporary files
+  1. Validate configuration; install scoped signal handling
+  2. Discover and freshly validate the target Sonos topology
+  3. Fetch the Keychain API key; synthesise text → temporary MP3
+  4. Isolate a grouped member; snapshot transport state + volume
+  5. Serve the MP3 on a target-IP-restricted capability URL
+  6. Freshly recheck isolation, play, and require observed completion
+  7. Restore state + grouping, clean resources, then report the outcome
 
 Usage:
     sonos-say "Hello, world!"
@@ -149,17 +149,18 @@ def get_api_key(service: str, account: str) -> str:
     """Retrieve ElevenLabs API key from macOS Keychain. Never prints the value."""
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
             capture_output=True,
             text=True,
             check=True,
+            timeout=10,
         )
         key = result.stdout.strip()
         if not key:
             raise RuntimeError("Keychain returned empty value")
         return key
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError("Could not retrieve API key from Keychain") from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        raise RuntimeError("Could not retrieve API key from Keychain") from None
 
 
 # ---------------------------------------------------------------------------
@@ -412,29 +413,6 @@ def serve_file(file_path: Path, bind_ip: str, allowed_client_ip: str):
 
 
 # ---------------------------------------------------------------------------
-# SIGTERM handling
-# ---------------------------------------------------------------------------
-
-def _install_sigterm_handler() -> None:
-    """
-    Convert SIGTERM into SystemExit(143) so that finally blocks—including
-    Sonos state restoration—run before the process exits.
-
-    SIGTERM is not available on Windows; we install silently on POSIX only.
-    Only installed once (idempotent via SIG_IGN check is skipped; we always
-    set our handler and let the caller decide).
-    """
-    if not hasattr(signal, "SIGTERM"):
-        return
-
-    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
-        log.warning("Received SIGTERM — cleaning up…")
-        raise SystemExit(143)
-
-    signal.signal(signal.SIGTERM, _handler)
-
-
-# ---------------------------------------------------------------------------
 # Sonos playback helpers
 # ---------------------------------------------------------------------------
 
@@ -514,7 +492,7 @@ def _defer_cleanup_signals():
 
 
 class _MutationSignalGuard:
-    """Handle signals from before mutation through cleanup handler entry."""
+    """Handle signals from live preflight through temporary-resource cleanup."""
 
     def __init__(self) -> None:
         self.cleaning = False
@@ -717,7 +695,7 @@ def announce(
     dry_run: bool = False,
     stability: Optional[str] = None,
 ) -> None:
-    """Full pipeline: synthesise, discover, serve, play, restore."""
+    """Full pipeline: validate, discover, synthesise, isolate, play, restore."""
 
     # --- validate text ---
     if not text:
@@ -765,147 +743,116 @@ def announce(
         os.environ.get("ELEVENLABS_KEYCHAIN_ACCOUNT"),
         "ELEVENLABS_KEYCHAIN_ACCOUNT",
     )
+    speaker = topology = None
+    snapshot: Optional[Snapshot] = None
+    snapshot_taken = False
+    original_volume: Optional[int] = None
+    topology_mutated = False
+    pending_error: Optional[BaseException] = None
+    cleanup_interrupt: Optional[BaseException] = None
+    restore_failed = False
+    signal_guard = _MutationSignalGuard()
+
+    def arm_group_recovery() -> None:
+        nonlocal topology_mutated
+        topology_mutated = True
+
+    def begin_cleanup() -> None:
+        if signal_guard.cleaning:
+            return
+        try:
+            signal_guard.begin_cleanup()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            signal_guard.deferred.append(exc)
+            signal_guard.cleaning = True
+
+    signal_guard.install()
     try:
-        api_key = get_api_key(service, account)
-    except Exception as exc:
-        raise SonosSayError("ELEVENLABS_KEY_FAILED") from exc
-
-    # Work in a temp directory that we own; cleaned up automatically.
-    with tempfile.TemporaryDirectory(prefix="sonos_say_") as tmpdir:
-        mp3_path = Path(tmpdir) / "announcement.mp3"
-
-        log.info("Synthesising speech via ElevenLabs…")
-        try:
-            synthesise_mp3(
-                text,
-                voice_id,
-                model,
-                api_key,
-                mp3_path,
-                stability=resolved_stability,
-            )
-        except Exception as exc:
-            raise SonosSayError("ELEVENLABS_SYNTHESIS_FAILED") from exc
-
-        log.info("Discovering Sonos speaker in room %r…", room)
-        try:
-            speaker = discover_speaker(room)
-            local_ip = local_ip_toward(speaker.ip_address)
-        except Exception as exc:
-            raise SonosSayError("SONOS_DISCOVERY_FAILED") from exc
-        log.debug("Local IP toward speaker: %s", local_ip)
-
-        try:
-            topology = validate_announcement_target(speaker)
-        except TopologyError as exc:
-            raise SonosSayError("SONOS_TOPOLOGY_FAILED") from exc
-
-        # All mutable Sonos state is captured and restored inside a single
-        # guarded block.  snapshot_taken and original_volume track whether
-        # each capture succeeded so that restoration is never attempted
-        # without a valid baseline.
-        #
-        # Interruption policy:
-        #   KeyboardInterrupt (Ctrl-C) → cleanup → re-raise KeyboardInterrupt
-        #                                → main() returns 130
-        #   SystemExit(143)   (SIGTERM) → cleanup → re-raise SystemExit(143)
-        #                                → shell/orchestrator sees exit code 143
-        #   SystemExit(N!=143)          → cleanup → re-raise SystemExit(N) unchanged
-        snapshot: Optional[Snapshot] = None
-        snapshot_taken = False
-        original_volume: Optional[int] = None
-        topology_mutated = False
-        pending_error: Optional[BaseException] = None
-        cleanup_interrupt: Optional[BaseException] = None
-        restore_failed = False
-        signal_guard = _MutationSignalGuard()
-        signal_guard.install()
-
-        try:
-            if topology.detach:
-                # Set this before unjoin: a timed-out call may still have
-                # changed the household and therefore always requires rejoin.
-                topology_mutated = True
-                detach_target(topology)
-
-            # A grouped member cannot reliably accept transport snapshot
-            # calls. Once isolated it is its own coordinator, while rejoining
-            # later restores the original group's transport ownership.
-            snapshot = Snapshot(speaker)
-            snapshot.snapshot()
-            snapshot_taken = True
-            log.debug("Snapshot taken")
-            original_volume = speaker.volume
-
-            with serve_file(mp3_path, local_ip, speaker.ip_address) as mp3_url:
-                log.info("Serving announcement to the target speaker")
-                verify_isolated_target(topology)
-                speaker.volume = volume
-                log.info("Playing announcement…")
-                speaker.play_uri(mp3_url, title="Announcement")
-
-                finished = wait_for_playback(speaker, timeout)
-                if not finished:
-                    raise SonosSayError("SONOS_PLAYBACK_FAILED")
-        except BaseException as exc:
-            pending_error = exc
-        finally:
+        # Keep the guard installed until ExitStack has deleted temporary audio.
+        # Evaluate deferred signals and restoration failures only afterward.
+        with contextlib.ExitStack() as resources:
             try:
-                signal_guard.begin_cleanup()
-            except (KeyboardInterrupt, SystemExit) as exc:
-                # A direct interrupt at the transition cannot be deferred by
-                # the handler until cleaning is true. Record it and complete
-                # the atomic state transition before any restoration starts.
-                signal_guard.deferred.append(exc)
-                signal_guard.cleaning = True
-            try:
+                log.info("Discovering Sonos speaker in room %r…", room)
                 try:
-                    restore_failed, cleanup_interrupt = (
-                        _restore_after_announcement(
-                            speaker,
-                            snapshot,
-                            snapshot_taken,
-                            original_volume,
-                            topology,
-                            topology_mutated,
-                        )
+                    speaker = discover_speaker(room)
+                    local_ip = local_ip_toward(speaker.ip_address)
+                except Exception as exc:
+                    raise SonosSayError("SONOS_DISCOVERY_FAILED") from exc
+                topology = validate_announcement_target(speaker)
+
+                try:
+                    api_key = get_api_key(service, account)
+                except Exception as exc:
+                    raise SonosSayError("ELEVENLABS_KEY_FAILED") from exc
+
+                tmpdir = resources.enter_context(
+                    tempfile.TemporaryDirectory(prefix="sonos_say_")
+                )
+                mp3_path = Path(tmpdir) / "announcement.mp3"
+                log.info("Synthesising speech via ElevenLabs…")
+                try:
+                    synthesise_mp3(
+                        text, voice_id, model, api_key, mp3_path,
+                        stability=resolved_stability,
+                    )
+                except Exception as exc:
+                    raise SonosSayError("ELEVENLABS_SYNTHESIS_FAILED") from exc
+                finally:
+                    del api_key
+
+                if topology.detach:
+                    detach_target(topology, before_unjoin=arm_group_recovery)
+
+                # Snapshot only after isolation, when the target owns transport.
+                snapshot = Snapshot(speaker)
+                snapshot.snapshot()
+                snapshot_taken = True
+                original_volume = speaker.volume
+
+                with serve_file(mp3_path, local_ip, speaker.ip_address) as mp3_url:
+                    try:
+                        log.info("Serving announcement to the target speaker")
+                        verify_isolated_target(topology)
+                        speaker.volume = volume
+                        speaker.play_uri(mp3_url, title="Announcement")
+                        if not wait_for_playback(speaker, timeout):
+                            raise SonosSayError("SONOS_PLAYBACK_FAILED")
+                    finally:
+                        # Deferral must start before server context exit too.
+                        begin_cleanup()
+            except BaseException as exc:
+                pending_error = exc
+            finally:
+                begin_cleanup()
+                try:
+                    restore_failed, cleanup_interrupt = _restore_after_announcement(
+                        speaker, snapshot, snapshot_taken, original_volume,
+                        topology, topology_mutated,
                     )
                 except (KeyboardInterrupt, SystemExit) as exc:
-                    # The outer guard is already in cleanup mode. This catches
-                    # direct interruption injected at inner handler entry,
-                    # before that inner handler can become active.
+                    # Catch interruption before the inner deferral is installed.
                     signal_guard.deferred.append(exc)
-                    restore_failed, cleanup_interrupt = (
-                        _restore_after_announcement(
-                            speaker,
-                            snapshot,
-                            snapshot_taken,
-                            original_volume,
-                            topology,
-                            topology_mutated,
-                        )
+                    restore_failed, cleanup_interrupt = _restore_after_announcement(
+                        speaker, snapshot, snapshot_taken, original_volume,
+                        topology, topology_mutated,
                     )
-            finally:
-                signal_guard.restore()
+    finally:
+        signal_guard.restore()
 
-            if signal_guard.deferred:
-                cleanup_interrupt = signal_guard.deferred[0]
-
-        if restore_failed:
-            cause = pending_error or cleanup_interrupt
-            raise SonosSayError("SONOS_RESTORE_FAILED") from cause
-        if cleanup_interrupt is not None:
-            raise cleanup_interrupt
-        if pending_error is not None:
-            if isinstance(pending_error, (KeyboardInterrupt, SystemExit)):
-                raise pending_error
-            if isinstance(pending_error, TopologyError):
-                raise SonosSayError(
-                    "SONOS_TOPOLOGY_FAILED"
-                ) from pending_error
-            raise SonosSayError(
-                "SONOS_PLAYBACK_FAILED"
-            ) from pending_error
+    if signal_guard.deferred:
+        cleanup_interrupt = signal_guard.deferred[0]
+    if restore_failed:
+        raise SonosSayError("SONOS_RESTORE_FAILED") from (
+            pending_error or cleanup_interrupt
+        )
+    if cleanup_interrupt is not None:
+        raise cleanup_interrupt
+    if pending_error is not None:
+        if isinstance(pending_error, (KeyboardInterrupt, SystemExit, SonosSayError)):
+            raise pending_error
+        if isinstance(pending_error, TopologyError):
+            raise SonosSayError("SONOS_TOPOLOGY_FAILED") from pending_error
+        raise SonosSayError("SONOS_PLAYBACK_FAILED") from pending_error
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 TOPOLOGY_POLL_SECONDS = 0.1
@@ -23,6 +23,7 @@ class TopologyPlan:
     coordinator_uid: str
     detach: bool
     member_uids: frozenset[str]
+    members: tuple[Any, ...]
     speaker: Any
     speaker_uid: str
 
@@ -40,7 +41,15 @@ def _uid(speaker: Any) -> str:
 def inspect_topology(speaker: Any) -> TopologyPlan:
     """Return a fail-closed plan for a standalone, coordinator, or member."""
     try:
+        state = speaker.zone_group_state
+        # SoCo 0.31.2 skips polling under subscriptions, even after invalidation.
+        # Require a network observation rather than silently accepting that cache.
+        if state.has_subscriptions is not False:
+            raise TopologyError("fresh polling is unavailable under subscriptions")
+        state.clear_cache()
         group = speaker.group
+        if state.has_subscriptions is not False:
+            raise TopologyError("fresh polling is unavailable under subscriptions")
         coordinator = group.coordinator
         members = list(group.members)
     except Exception as exc:
@@ -66,6 +75,7 @@ def inspect_topology(speaker: Any) -> TopologyPlan:
         coordinator_uid=coordinator_uid,
         detach=len(members) > 1 and not target_is_coordinator,
         member_uids=frozenset(member_uids),
+        members=tuple(members),
         speaker=speaker,
         speaker_uid=speaker_uid,
     )
@@ -81,7 +91,7 @@ def validate_announcement_target(speaker: Any) -> TopologyPlan:
     if len(plan.member_uids) > 1 and not plan.detach:
         raise TopologyError("grouped coordinators cannot receive room announcements")
     try:
-        for member in speaker.group.members:
+        for member in plan.members:
             if (member.is_visible is not True
                     or member.is_satellite is not False
                     or member.has_satellites is not False):
@@ -131,6 +141,7 @@ def _wait_for_topology(
 def detach_target(
     plan: TopologyPlan,
     timeout: float = TOPOLOGY_VERIFY_TIMEOUT,
+    before_unjoin: Optional[Callable[[], None]] = None,
 ) -> None:
     """Detach only a validated grouped non-coordinator and verify isolation."""
     if not plan.detach:
@@ -140,6 +151,10 @@ def detach_target(
             or observed.coordinator_uid != plan.coordinator_uid
             or observed.member_uids != plan.member_uids):
         raise TopologyError("group changed before isolation")
+    # Arm recovery at the RPC boundary, not before validation or after return:
+    # the speaker can apply the mutation and then time out.
+    if before_unjoin is not None:
+        before_unjoin()
     try:
         plan.speaker.unjoin()
     except Exception as exc:

@@ -28,8 +28,10 @@ description: >-
 
 Requires macOS with CoreAudio/CoreFoundation, Python 3.8+, and `ffplay` from
 ffmpeg (`/opt/homebrew/bin/ffplay` or on `PATH`). No third-party Python packages
-are required. Deploy `elevenlabs-voice-policy` alongside `airpods-say`; its
-`scripts/elevenlabs_voice.py` supplies shared model/stability policy.
+are required. For copied installations, deploy `elevenlabs-voice-policy`
+alongside `airpods-say`; its `scripts/elevenlabs_voice.py` supplies shared policy.
+A symlink of this entire skill resolves the policy beside the real checkout;
+it does not require a separate policy symlink.
 
 Speech text is sent to ElevenLabs for synthesis; this is not local-only TTS.
 Explain this during setup and send only content authorized for that processing.
@@ -106,8 +108,15 @@ promise of consistent performance. Test unfamiliar tags; do not automatically
 decorate ordinary speech. Accent results vary, and prior `[sings]` experiments
 remained spoken rather than melodic.
 
-Other options: `--timeout SEC` sets a positive HTTP timeout; `--debug` enables
-diagnostics, including device/configuration metadata, without printing the key.
+`--timeout SEC` sets a positive request/header and body-data inactivity timeout
+(default: 30 seconds), not a deadline for the whole speech. Blocking decoded
+`HTTPResponse.read1()` feeds a bounded queue; healthy progress and player
+backpressure do not exhaust that deadline. Redirects are refused, and MP3 format
+is selected in the request query. After network EOF, success requires ffplay
+exit 0 within the existing duration-aware drain limit (30–600 seconds).
+
+`--debug` enables timing and device diagnostics without printing the key,
+Keychain selector values, or provider error details.
 
 ## Exit handling
 
@@ -116,7 +125,7 @@ diagnostics, including device/configuration metadata, without printing the key.
 - **2:** AirPods not active or output changed before playback; remain text-only.
 - **3:** output changed/disconnected during playback; do not retry automatically.
 - **4:** Keychain credential lookup failed.
-- **5:** ElevenLabs request failed.
+- **5:** ElevenLabs request/header/body-network failure or inactivity timeout.
 - **6:** `ffplay` missing.
 
 Report failures concisely in text. Never expose credentials or provider response

@@ -4,14 +4,17 @@
 
 The implementation uses Python's standard library, SoCo, and the sibling
 `elevenlabs-voice-policy/scripts/elevenlabs_voice.py`. Package both skills at the
-same directory level. The shared policy owns `DEFAULT_MODEL_ID` (`eleven_v4`)
-and v3 stability presets, not user voice IDs or credential selectors.
+same directory level for copied installations. Whole-skill symlinks resolve
+the policy next to the real checkout; no separate policy symlink is necessary.
+The shared policy owns `DEFAULT_MODEL_ID` (`eleven_v4`) and v3 stability presets,
+not user voice IDs or credential selectors.
 
 - `--voice-id` overrides `ELEVENLABS_VOICE_ID`; no bundled voice.
 - `--room` overrides `SONOS_ROOM`; no implicit destination.
 - Normal execution requires `ELEVENLABS_KEYCHAIN_SERVICE` and
   `ELEVENLABS_KEYCHAIN_ACCOUNT`. They select an existing Keychain item.
-  The key is retrieved through `security find-generic-password`, never logged.
+  The key is retrieved through `/usr/bin/security find-generic-password` with
+  a ten-second timeout. Lookup errors omit selector values and subprocess stderr.
 - Help needs no configuration. Dry-run needs room/voice but no Keychain selectors.
   It validates and describes the request without network, credentials, discovery,
   or speaker access. Its output includes the submitted text, so treat it accordingly.
@@ -32,16 +35,16 @@ file. Credential creation or rotation is a separate, user-authorized operation.
 
 ## Pipeline
 
-1. Validate configuration and read the selected Keychain item.
-2. Send the exact speech text to ElevenLabs and write a temporary MP3.
-3. Discover the room by case-insensitive name; reject missing/ambiguous matches.
-4. Inspect topology and reject unsupported announcement targets.
-5. Install cleanup-aware signal handling; isolate a grouped non-coordinator.
+1. Validate all configuration; install scoped, cleanup-aware signal handling.
+2. Discover the room by case-insensitive name; reject missing/ambiguous matches.
+3. Freshly inspect topology and reject unsupported announcement targets.
+4. Read the selected Keychain item; synthesize the exact text to temporary MP3.
+5. Freshly validate again; arm recovery immediately before unjoin and isolate.
 6. Capture transport state and original volume.
 7. Start the restricted HTTP server, recheck isolation, set volume, and play.
 8. Wait for PLAYING followed by STOPPED within the configured deadline.
 9. Shut down the server; restore captured state, volume, and original grouping.
-10. Remove temporary files and report the outcome after cleanup.
+10. Remove temporary files, restore prior signal handlers, then report outcome.
 
 Synthesis completes before group changes. SoCo uses multicast UPnP discovery;
 there are no fixed speaker IPs. The local bind address is selected by routing
@@ -92,6 +95,14 @@ coordinators are refused without playback; raw inspection must still accept them
 when checking the original group during restoration. Bonded/hidden devices and
 unknown topology flags are unsupported and fail closed.
 
+Each independent inspection clears `zone_group_state`'s five-second polling
+cache before reading the group. Eligibility uses that same sampled membership.
+This refreshes initial/pre-unjoin/pre-playback checks and every convergence
+sample, including coordinator-side restoration checks. Cache-clear/read failures
+fail closed. Active topology subscriptions bypass polling even after invalidation
+in SoCo 0.31.2; they are unsupported and refused rather than treated as fresh.
+Offline cache-aware tests do not establish firmware compatibility.
+
 A grouped member is detached and verified as standalone before snapshot/playback.
 Before unjoining, its identity and original topology are checked again. Immediately
 before playback, its identity and singleton membership are rechecked. Restoration
@@ -106,9 +117,13 @@ errors or mismatches are failures, not successful verification. Cleanup continue
 attempting independent restoration steps after failures. Successful API calls are
 not proof of frame-accurate queue/seek restoration; brief interruption is inherent.
 
-SIGINT/SIGTERM are deferred during cleanup, with prior handlers restored on exit.
+SIGINT/SIGTERM handling is installed before live preflight, including direct
+`announce()` callers. Signals are deferred through server shutdown, restoration,
+and temporary-directory exit; prior handlers are restored only after deletion.
 Restoration failure takes precedence over interrupts and playback failures.
-Otherwise deferred interrupts propagate, then the original playback failure.
+Otherwise deferred interrupts propagate, then the original phase failure.
+A failed pre-unjoin validation incurs no recovery obligation or group RPC;
+a validated unjoin attempt does, even if it mutates the device then times out.
 
 ## Completion and error contract
 

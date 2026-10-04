@@ -16,6 +16,9 @@ Fix: after stdin EOF, _drain_ffplay() is called.  It:
 
 from __future__ import annotations
 
+import http.client
+import io
+import socket
 import subprocess
 import sys
 import threading
@@ -58,6 +61,7 @@ def _make_proc(poll_results: list) -> MagicMock:
         i = call_index[0]
         val = results[min(i, len(results) - 1)]
         call_index[0] += 1
+        proc.returncode = val
         return val
 
     proc.poll.side_effect = _poll
@@ -418,6 +422,8 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
     ) -> int:
         """Helper: run play_stream() with mocked subprocess and device."""
         resp = _FakeResponse(chunks)
+        if isinstance(proc_mock, MagicMock) and proc_mock.stdin.write.side_effect is None:
+            proc_mock.stdin.write.side_effect = lambda data: len(data)
         device_fn = device_name_side_effect or (lambda: self._AIRPODS_NAME)
 
         with ExitStack() as stack:
@@ -429,6 +435,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
                       side_effect=device_fn)
             )
             stack.enter_context(patch("airpods_say.signal.signal"))
+            stack.enter_context(patch("airpods_say.os.set_blocking"))
             try:
                 rc = play_stream(
                     resp=resp,
@@ -446,18 +453,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
         """
         Stream ends, drain completes naturally → play_stream returns 0.
         """
-        # Proc polls None a few times then exits
-        call_count = [0]
-        def _poll():
-            call_count[0] += 1
-            return None if call_count[0] < 4 else 0
-
-        proc = MagicMock(spec=subprocess.Popen)
-        proc.poll.side_effect = _poll
-        proc.stdin = MagicMock()
-        proc.kill.return_value = None
-        proc.terminate.return_value = None
-        proc.wait.return_value = 0
+        proc = _Player()
 
         orig_poll = airpods_say._DRAIN_POLL_SECS
         orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
@@ -473,7 +469,8 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
 
         self.assertEqual(rc, 0)
-        proc.kill.assert_not_called()
+        self.assertFalse(proc.killed)
+        self.assertEqual(proc.audio, b"audio-data-chunk")
 
     def test_device_changes_during_drain_returns_3(self):
         """
@@ -547,17 +544,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
         audio is < 0.002 s → safety_secs rounds to DRAIN_TIMEOUT_MIN_SECS.
         This test just confirms play_stream completes without error.
         """
-        call_count = [0]
-        def _poll():
-            call_count[0] += 1
-            return 0 if call_count[0] > 2 else None
-
-        proc = MagicMock(spec=subprocess.Popen)
-        proc.poll.side_effect = _poll
-        proc.stdin = MagicMock()
-        proc.kill.return_value = None
-        proc.terminate.return_value = None
-        proc.wait.return_value = 0
+        proc = _Player()
 
         orig_poll = airpods_say._DRAIN_POLL_SECS
         orig_min  = airpods_say._DRAIN_TIMEOUT_MIN_SECS
@@ -573,6 +560,7 @@ class TestPlayStreamDrainIntegration(unittest.TestCase):
             airpods_say._DRAIN_TIMEOUT_MIN_SECS = orig_min
 
         self.assertEqual(rc, 0)
+        self.assertEqual(proc.audio, b"x" * 30)
 
     def test_ffplay_unexpected_death_returns_1(self):
         """
@@ -669,10 +657,7 @@ class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
                 self._sent += 1
                 if self._sent > 100:
                     return b""  # eventual EOF safety
-                try:
-                    return os.read(self._r, min(size, 32))
-                except OSError:
-                    return b""
+                return b"a" * min(size, 32)
 
             def read(self, size=-1):
                 return self.read1(size)
@@ -700,7 +685,9 @@ class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
         with patch("airpods_say.subprocess.Popen", return_value=proc):
             with patch("airpods_say.get_default_output_device_name",
                        side_effect=_device):
-                with patch("airpods_say.signal.signal"):
+                with patch("airpods_say.signal.signal"), \
+                        patch("airpods_say.os.set_blocking"):
+                    proc.stdin.write.side_effect = lambda data: len(data)
                     try:
                         rc = play_stream(
                             resp=resp,
@@ -713,6 +700,415 @@ class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
                         resp.close()
 
         self.assertEqual(rc, 3)
+
+
+# ---------------------------------------------------------------------------
+# Real HTTP framing, buffering, inactivity, and cancellation regressions
+# ---------------------------------------------------------------------------
+
+class _Player:
+    """State changes follow stdin EOF/termination, not poll call counts."""
+
+    def __init__(self, eof_status=0):
+        self.returncode = None
+        self.eof_status = eof_status
+        self.audio = bytearray()
+        self.closed = False
+        self.reaped = False
+        self.killed = False
+        self.on_write = None
+        self.stdin = self
+
+    def fileno(self):
+        return 9999  # os.set_blocking is patched; no real player is launched
+
+    def write(self, data):
+        if self.on_write:
+            self.on_write(data)
+        self.audio.extend(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+        if self.returncode is None:
+            self.returncode = self.eof_status
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.reaped = True
+        return self.returncode
+
+
+class TestStreamReader(unittest.TestCase):
+    def setUp(self):
+        self.name = "Test AirPods"
+        self.sockets = []
+        self.threads = []
+        self.release = threading.Event()
+        self.queue_full = threading.Event()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.release.set()
+        for sock in self.sockets:
+            sock.close()
+        for thread in self.threads:
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def response(self, initial=b"", chunked=False):
+        client, server = socket.socketpair()
+        client.settimeout(2)
+        server.settimeout(2)
+        self.sockets.extend((client, server))
+        header = (b"Transfer-Encoding: chunked\r\n" if chunked else
+                  b"Content-Length: 1000000\r\n")
+        server.sendall(b"HTTP/1.1 200 OK\r\n" + header + b"\r\n" + initial)
+        resp = http.client.HTTPResponse(client)
+        resp.begin()
+        return resp, server
+
+    def play(self, resp, proc=None, device=None, timeout=0.08):
+        proc = proc or _Player()
+        reader_type = airpods_say._StreamReader
+
+        def observe_reader(response):
+            reader = reader_type(response)
+            self.assertIsInstance(reader.socket, socket.socket)
+            put = reader.chunks.put
+
+            def observed_put(chunk, **kwargs):
+                put(chunk, **kwargs)
+                if reader.chunks.full():
+                    self.queue_full.set()
+
+            reader.chunks.put = observed_put
+            return reader
+
+        with patch("airpods_say._StreamReader", side_effect=observe_reader), \
+                patch("airpods_say.subprocess.Popen", return_value=proc), \
+                patch("airpods_say.get_default_output_device_name",
+                      side_effect=device or (lambda: self.name)), \
+                patch("airpods_say.os.set_blocking"), \
+                patch("airpods_say.signal.signal"), \
+                patch("sys.stderr", io.StringIO()) as stderr:
+            rc = play_stream(resp, "/fake/ffplay", self.name, False,
+                             poll_interval=0.01, timeout=timeout)
+        self.assertTrue(proc.closed)
+        self.assertTrue(proc.reaped)
+        self.assertTrue(resp.closed)
+        self.assertFalse(any(t.name == "airpods-stream-reader" and t.is_alive()
+                             for t in threading.enumerate()))
+        self.assertNotIn("Traceback", stderr.getvalue())
+        return rc, proc
+
+    def test_headers_then_no_body_times_out_and_cancels_reader(self):
+        resp, _ = self.response()
+        start = time.monotonic()
+        rc, _ = self.play(resp)
+        self.assertEqual(rc, 5)
+        self.assertLess(time.monotonic() - start, 1)
+
+    def test_partial_body_then_stall_delivers_audio_and_returns_5(self):
+        resp, _ = self.response(b"audio-prefix")
+        rc, proc = self.play(resp)
+        self.assertEqual(rc, 5)
+        self.assertEqual(proc.audio, b"audio-prefix")
+
+    def test_buffered_chunked_bytes_arrive_without_another_packet(self):
+        audio = b"x" * 6000
+        resp, _ = self.response(b"1770\r\n" + audio + b"\r\n", chunked=True)
+        # begin() buffered the body while parsing headers. The raw descriptor
+        # is not readable: gating read1 on select would strand these bytes.
+        import select
+        self.assertEqual(select.select([resp], [], [], 0)[0], [])
+        rc, proc = self.play(resp)
+        self.assertEqual(rc, 5)  # no terminal chunk; audio still must be delivered
+        self.assertEqual(proc.audio, audio)
+
+    def test_chunked_response_larger_than_read_size_is_decoded(self):
+        size = airpods_say.STREAM_CHUNK * 3 + 31
+        audio = b"a" * size
+        resp, _ = self.response(f"{size:x}\r\n".encode() + audio +
+                                b"\r\n0\r\n\r\n", chunked=True)
+        rc, proc = self.play(resp)
+        self.assertEqual(rc, 0)
+        self.assertEqual(proc.audio, audio)
+
+    def test_regular_progress_can_exceed_total_timeout(self):
+        resp, server = self.response(chunked=True)
+        finished = threading.Event()
+
+        def send():
+            try:
+                for _ in range(8):
+                    server.sendall(b"1\r\nx\r\n")
+                    if self.release.wait(0.02):
+                        return
+                server.sendall(b"0\r\n\r\n")
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=send)
+        self.threads.append(thread)
+        thread.start()
+        start = time.monotonic()
+        rc, proc = self.play(resp, timeout=0.12)
+        self.assertEqual(rc, 0)
+        self.assertEqual(proc.audio, b"x" * 8)
+        self.assertGreater(time.monotonic() - start, 0.12)
+        self.assertTrue(finished.wait(1))
+
+    def test_network_worker_error_is_5_and_sanitized(self):
+        resp, _ = self.response(b"invalid-chunk\r\n", chunked=True)
+        rc, _ = self.play(resp)
+        self.assertEqual(rc, 5)
+
+    def test_device_change_wins_while_reader_is_blocked(self):
+        resp, _ = self.response()
+        rc, _ = self.play(resp, device=lambda: "Built-in Speakers")
+        self.assertEqual(rc, 3)
+
+    def test_player_failure_after_eof_is_not_success(self):
+        for status in (1, -9):
+            with self.subTest(status=status):
+                resp, _ = self.response(b"1\r\nx\r\n0\r\n\r\n", chunked=True)
+                rc, _ = self.play(resp, proc=_Player(eof_status=status))
+                self.assertEqual(rc, 1)
+
+    def test_queue_backpressure_does_not_turn_healthy_audio_into_timeout(self):
+        # More audio than a bounded queue can hold; pause the consumer while
+        # the worker fills it. Pending EOF must survive queue pressure too.
+        audio = b"x" * 32000
+        resp, server = self.response(chunked=True)
+        finished = threading.Event()
+
+        def send():
+            server.sendall(f"{len(audio):x}\r\n".encode() + audio +
+                           b"\r\n0\r\n\r\n")
+            finished.set()
+
+        thread = threading.Thread(target=send)
+        self.threads.append(thread)
+        thread.start()
+        proc = _Player()
+        paused = []
+
+        def pause_once(data):
+            if not paused:
+                paused.append(True)
+                self.assertTrue(self.queue_full.wait(1))
+                self.release.wait(0.15)
+
+        proc.on_write = pause_once
+        rc, _ = self.play(resp, proc=proc, timeout=0.1)
+        self.assertEqual(rc, 0)
+        self.assertEqual(proc.audio, audio)
+        self.assertTrue(finished.wait(1))
+
+    def test_worker_error_after_full_queue_is_not_lost(self):
+        audio = b"x" * 32000
+        resp, server = self.response(chunked=True)
+
+        def send():
+            server.sendall(f"{len(audio):x}\r\n".encode() + audio +
+                           b"\r\ninvalid-chunk\r\n")
+
+        thread = threading.Thread(target=send)
+        self.threads.append(thread)
+        thread.start()
+        proc = _Player()
+        paused = []
+
+        def pause_once(data):
+            if not paused:
+                paused.append(True)
+                self.assertTrue(self.queue_full.wait(1))
+                self.release.wait(0.12)
+
+        proc.on_write = pause_once
+        rc, _ = self.play(resp, proc=proc, timeout=0.1)
+        self.assertEqual(rc, 5)
+        self.assertEqual(proc.audio, audio)
+
+    def test_nonblocking_player_stall_still_allows_device_cancellation(self):
+        resp, server = self.response(chunked=True)
+
+        def send():
+            try:
+                server.sendall(b"7d00\r\n" + b"x" * 32000 + b"\r\n")
+            except OSError:
+                pass
+
+        thread = threading.Thread(target=send)
+        self.threads.append(thread)
+        thread.start()
+        proc = _Player()
+        with patch.object(proc, "write", return_value=None):
+            rc, _ = self.play(resp, proc=proc, timeout=0.5,
+                              device=lambda: "Built-in Speakers"
+                              if self.queue_full.is_set() else self.name)
+        self.assertEqual(rc, 3)
+        self.assertTrue(self.queue_full.is_set())
+
+    def test_cancellation_with_full_queue_releases_reader(self):
+        resp, server = self.response(chunked=True)
+        changed = threading.Event()
+
+        def send():
+            try:
+                server.sendall(b"7d00\r\n" + b"x" * 32000 + b"\r\n")
+            except OSError:
+                pass  # cancellation also closes the test-owned sender
+
+        thread = threading.Thread(target=send)
+        self.threads.append(thread)
+        thread.start()
+        proc = _Player()
+
+        def pause(data):
+            self.assertTrue(self.queue_full.wait(1))
+            self.release.wait(0.08)
+            changed.set()
+            self.release.wait(0.03)
+
+        proc.on_write = pause
+        rc, _ = self.play(resp, proc=proc, timeout=0.5,
+                          device=lambda: "Built-in Speakers" if changed.is_set()
+                          else self.name)
+        self.assertEqual(rc, 3)
+        # The peer's send may remain blocked until test-owned socket teardown;
+        # _cleanup closes both ends and asserts every sender thread has stopped.
+
+    def test_late_enqueue_at_empty_timeout_is_not_lost_to_eof(self):
+        import queue
+        resp, _ = self.response(b"1\r\nx\r\n0\r\n\r\n", chunked=True)
+        real_queue = queue.Queue
+        reader_finished = threading.Event()
+        real_reader = airpods_say._StreamReader
+
+        class RacingQueue(real_queue):
+            def get(self, block=True, timeout=None):
+                if block:
+                    # Model a get timeout followed immediately by a producer
+                    # enqueue+EOF, before the consumer examines done.
+                    if not reader_finished.wait(1):
+                        raise AssertionError("reader did not finish")
+                    raise queue.Empty
+                return super().get(block=block, timeout=timeout)
+
+        class FinishedReader(real_reader):
+            def _read(self):
+                try:
+                    super()._read()
+                finally:
+                    reader_finished.set()
+
+        with patch("airpods_say.queue.Queue", RacingQueue), \
+                patch("airpods_say._StreamReader", FinishedReader):
+            rc, proc = self.play(resp)
+        self.assertEqual(rc, 0)
+        self.assertEqual(proc.audio, b"x")
+
+    def test_truncated_fixed_length_body_is_not_clean_eof(self):
+        resp, server = self.response(b"partial")
+        server.shutdown(socket.SHUT_WR)
+        rc, proc = self.play(resp)
+        self.assertEqual(rc, 5)
+        self.assertEqual(proc.audio, b"partial")
+
+    def test_real_inert_player_pipe_is_nonblocking_closed_and_reaped(self):
+        # An inert Python child stands in for ffplay: no decoder, audio output,
+        # or physical device is used. Exercise real FileIO/OS pipe semantics.
+        for status in (0, 1):
+            with self.subTest(status=status):
+                audio = b"x" * 4096
+                resp, _ = self.response(b"1000\r\n" + audio +
+                                        b"\r\n0\r\n\r\n", chunked=True)
+                proc = subprocess.Popen(
+                    [sys.executable, "-c",
+                     f"import sys; data=sys.stdin.buffer.read(); "
+                     f"print(len(data)); sys.exit({status})"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
+                )
+                try:
+                    with patch("airpods_say.subprocess.Popen", return_value=proc), \
+                            patch("airpods_say.get_default_output_device_name",
+                                  return_value=self.name), \
+                            patch("sys.stderr", io.StringIO()):
+                        rc = play_stream(resp, "/fake/ffplay", self.name, False,
+                                         timeout=0.5, poll_interval=0.01)
+                    self.assertEqual(rc, status)
+                    self.assertEqual(proc.returncode, status)
+                    self.assertTrue(proc.stdin.closed)
+                    self.assertTrue(resp.closed)
+                    self.assertEqual(proc.stdout.read().strip(), b"4096")
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=2)
+                    proc.stdin.close()
+                    proc.stdout.close()
+
+    def test_loopback_http_stall_is_bounded_and_closes_real_response(self):
+        import http.server
+        from test_airpods_voice_payload import loopback_server, request
+        finished = threading.Event()
+        release = self.release
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.flush()
+                release.wait(2)
+                finished.set()
+
+        with loopback_server(Handler) as port:
+            with patch("airpods_say.ELEVENLABS_STREAM_URL",
+                       f"http://127.0.0.1:{port}/{{voice_id}}"):
+                resp = request(timeout=1)
+                rc, _ = self.play(resp)
+                self.assertEqual(rc, 5)
+            release.set()
+            self.assertTrue(finished.wait(1))
+
+
+class TestDrainFailedStatus(unittest.TestCase):
+    def test_termination_timeout_kills_and_reaps(self):
+        proc = _make_proc([None])
+        proc.wait.side_effect = [subprocess.TimeoutExpired("fake-player", 3), -9]
+        airpods_say._stop_ffplay(proc)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        self.assertEqual(proc.wait.call_count, 2)
+        proc.wait.assert_called_with(timeout=3)
+
+    def test_nonzero_and_signal_statuses_fail_immediately_or_later(self):
+        for status in (1, 42, -9, -15):
+            for polls in ([status], [None, None, status]):
+                with self.subTest(status=status, polls=polls), \
+                        patch("airpods_say._DRAIN_POLL_SECS", 0.001):
+                    self.assertEqual(_drain_ffplay(
+                        _make_proc(polls), threading.Event(), 8000, False,
+                        _no_timing()), 1)
 
 
 # ---------------------------------------------------------------------------

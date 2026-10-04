@@ -3,6 +3,7 @@ import http.server
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
 import types
@@ -10,6 +11,7 @@ import unittest
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 _soco = types.ModuleType("soco")
 _soco.SoCo = MagicMock()
@@ -35,6 +37,18 @@ class ConfiguredTestCase(unittest.TestCase):
         self.env = patch.dict(os.environ, TEST_CONFIG, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
+        # Key/provider failures now follow a valid, read-only preflight.
+        speaker = MagicMock(uid="test-target", ip_address="192.0.2.2",
+                            is_visible=True, is_satellite=False,
+                            has_satellites=False)
+        speaker.zone_group_state.has_subscriptions = False
+        speaker.group = SimpleNamespace(coordinator=speaker, members=[speaker])
+        discovery = patch("sonos_say.discover_speaker", return_value=speaker)
+        routing = patch("sonos_say.local_ip_toward", return_value="192.0.2.1")
+        discovery.start()
+        routing.start()
+        self.addCleanup(discovery.stop)
+        self.addCleanup(routing.stop)
 
 
 class TestVoiceCli(ConfiguredTestCase):
@@ -164,6 +178,25 @@ class TestVoiceConfiguration(ConfiguredTestCase):
             sonos_say.announce("Hello")
         key.assert_called_once_with("test-tts-service", "test-tts-account")
         self.assertEqual(raised.exception.code, "ELEVENLABS_KEY_FAILED")
+
+    def test_keychain_subprocess_failures_emit_only_fixed_cli_marker(self):
+        errors = (
+            subprocess.TimeoutExpired("private-selector", 10,
+                                      stderr=b"private-stderr"),
+            FileNotFoundError("private-selector"),
+            subprocess.CalledProcessError(44, "private-selector",
+                                          stderr=b"private-stderr"),
+            MagicMock(stdout="   "),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch("sonos_say.subprocess.run",
+                           side_effect=error if isinstance(error, Exception) else None,
+                           return_value=error), \
+                        patch("sys.stderr", io.StringIO()) as stderr:
+                    self.assertEqual(sonos_say.main(["Hello", "--debug"]), 2)
+                self.assertEqual(stderr.getvalue(),
+                                 "SONOS_SAY_ERROR=ELEVENLABS_KEY_FAILED\n")
 
     def test_callable_rejects_explicit_blank_configuration(self):
         for override in ({"voice_id": ""}, {"room": " "}):

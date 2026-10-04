@@ -10,6 +10,9 @@ requirements before using it elsewhere.
 | Skill | Purpose |
 | --- | --- |
 | [agent-browser](agent-browser/SKILL.md) | Automate browsers and Electron apps with the `agent-browser` CLI. |
+| [airpods-say](voice/airpods-say/SKILL.md) | Speak selectively through the current AirPods output using ElevenLabs. |
+| [sonos-say](voice/sonos-say/SKILL.md) | Announce to a requested Sonos room with isolation and restoration safeguards. |
+| [elevenlabs-voice-policy](voice/elevenlabs-voice-policy/SKILL.md) | Shared model/stability policy for both voice consumers; not a speech command. |
 | [closed-loop](closed-loop/SKILL.md) | Run an opt-in investigate → approved plan → tests-first → repair/verify workflow. |
 | [code-critique](code-critique/SKILL.md) | Review code, diffs, plans, and technical documents without editing them. |
 | [developer](developer/SKILL.md) | Guide straightforward implementation, bug fixes, and refactoring. |
@@ -41,8 +44,14 @@ ln -s "$PWD/developer" ~/.agents/skills/developer
 ```
 
 Run the example from the repository root, and use the individual skill path
-(for example, `orchestration/herdr`) for nested skills. Don't replace an existing
-installed skill without checking it first.
+(for example, `orchestration/herdr` or `voice/airpods-say`) for nested skills.
+Don't replace an existing installed skill without checking it first.
+
+Voice consumers resolve symlinks to find `voice/elevenlabs-voice-policy` beside
+their real checkout. A symlink of the entire consumer skill needs no separate
+policy symlink. If copying instead, keep the shared policy directory beside both
+consumer directories. Installing or maintaining voice skills never activates
+speech; consult each skill's authorization and privacy rules before use.
 
 Skills are primarily instructions. Herdr also bundles two Python 3
 standard-library helpers:
