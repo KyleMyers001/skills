@@ -983,8 +983,8 @@ class LaunchAgentTests(unittest.TestCase):
             "gate": {
                 "reviewer": ("gpt-6.1-sol", "high", "edit,write"),
                 "e2e_planner": ("gpt-6.1-sol", "xhigh", None),
-                "qa": ("gpt-6-luna", "xhigh", "edit,write"),
-                "auditor": ("gpt-6-luna", "xhigh", "edit,write"),
+                "qa": ("gpt-6-luna", "max", "edit,write"),
+                "auditor": ("gpt-6-luna", "max", "edit,write"),
                 "developer": ("gpt-6.1-sol", "high", None),
             },
             "orchestrate-ticket": {
@@ -1012,8 +1012,8 @@ class LaunchAgentTests(unittest.TestCase):
     def test_workflow_profiles_forward_flags_and_gate_one_prompt(self):
         changed = [
             ("gate", "e2e_planner", "gpt-6.1-sol", "xhigh", "gpt-6-astra"),
-            ("gate", "qa", "gpt-6-luna", "xhigh", "gpt-5.6-terra"),
-            ("gate", "auditor", "gpt-6-luna", "xhigh", "gpt-5.6-terra"),
+            ("gate", "qa", "gpt-6-luna", "max", "gpt-5.6-terra"),
+            ("gate", "auditor", "gpt-6-luna", "max", "gpt-5.6-terra"),
             ("orchestrate-ticket", "planner", "gpt-6.1-sol", "max",
              "gpt-6-astra"),
         ]
