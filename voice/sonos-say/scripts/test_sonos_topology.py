@@ -392,5 +392,50 @@ class TestFreshTopology(unittest.TestCase):
         self.assertIs(self.household.live["target"].coordinator, self.target)
 
 
+class TestIdempotentTopology(unittest.TestCase):
+    def setUp(self):
+        self.h = _Household()
+        self.target, self.coord = _CachedSpeaker('target', self.h), _CachedSpeaker('coord', self.h)
+        self.h.group_members(self.coord, [self.coord, self.target])
+        self.clock = patch.object(topology.time, 'monotonic', side_effect=lambda: self.h.now)
+        self.sleep = patch.object(topology.time, 'sleep', side_effect=self.h.sleep)
+        self.clock.start(); self.sleep.start()
+        self.addCleanup(self.clock.stop); self.addCleanup(self.sleep.stop)
+        self.plan = topology.inspect_topology(self.target)
+
+    def test_already_original_returns_without_join_or_delay(self):
+        samples = self.h.samples
+        topology.restore_target_group(self.plan)
+        self.target.join.assert_not_called()
+        self.assertEqual(self.h.now, 0)
+        self.assertGreater(self.h.samples, samples)
+
+    def test_recovery_armed_then_interrupt_before_rpc_is_noop(self):
+        with self.assertRaises(KeyboardInterrupt):
+            topology.detach_target(self.plan, before_unjoin=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+        topology.restore_target_group(self.plan)
+        self.target.unjoin.assert_not_called()
+        self.target.join.assert_not_called()
+
+    def test_wait_cycles_are_half_second_and_deadline_bounded(self):
+        with self.assertRaises(topology.TopologyError):
+            topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 5)
+        self.assertEqual(self.h.now, 5)
+        self.assertEqual(self.h.samples, 12)  # plan plus initial sample and ten cycles
+        self.assertEqual(topology.TOPOLOGY_POLL_SECONDS, 0.5)
+        self.h.now = 0
+        with self.assertRaises(topology.TopologyError):
+            topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 0.2)
+        self.assertEqual(self.h.now, 0.2)
+
+    def test_unrelated_target_group_is_not_rejoined(self):
+        other = _CachedSpeaker('other', self.h)
+        self.h.group_members(self.coord, [self.coord])
+        self.h.group_members(other, [other, self.target])
+        with self.assertRaises(topology.TopologyError):
+            topology.restore_target_group(self.plan, timeout=0)
+        self.target.join.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

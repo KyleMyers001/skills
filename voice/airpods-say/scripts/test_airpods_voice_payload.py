@@ -1,6 +1,5 @@
 """Offline request-boundary regressions; every credential is a dummy."""
 
-import contextlib
 import http.client
 import http.server
 import io
@@ -14,30 +13,7 @@ import urllib.request
 from unittest.mock import MagicMock, patch
 
 import airpods_say
-
-
-@contextlib.contextmanager
-def loopback_server(handler):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.daemon_threads = True
-    thread = threading.Thread(target=server.serve_forever,
-                              kwargs={"poll_interval": 0.01})
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-
-def request(**kwargs):
-    options = dict(api_key="dummy-key", text="Hello", voice_id="test-voice",
-                   model_id="eleven_v4", output_format="mp3_44100_128",
-                   timeout=1, debug=False)
-    options.update(kwargs)
-    return airpods_say.stream_tts(**options)
-
+from airpods_test_support import loopback_server, request
 
 class TestVoicePayload(unittest.TestCase):
     def setUp(self):
@@ -183,3 +159,23 @@ class TestRedirectRejection(unittest.TestCase):
                 req, body, 302, "private-reason", {}, "http://example.invalid/target")
         raised.exception.close()
         self.assertTrue(body.closed)
+
+
+class TestAudioResponseHeaders(unittest.TestCase):
+    def test_missing_and_wrong_mime_close_before_player(self):
+        for mime in (None, 'application/json', 'text/html'):
+            response = MagicMock(status=200)
+            response.headers.get.return_value = mime
+            with self.subTest(mime=mime), patch.object(airpods_say.voice_policy, 'tts_opener') as opener:
+                opener.return_value.open.return_value = response
+                with self.assertRaises(airpods_say.ElevenLabsError):
+                    request()
+                response.close.assert_called_once()
+
+    def test_case_insensitive_mpeg_with_parameters(self):
+        response = MagicMock(status=200)
+        response.headers.get.return_value = 'Audio/MPEG; charset=binary'
+        with patch.object(airpods_say.voice_policy, 'tts_opener') as opener:
+            opener.return_value.open.return_value = response
+            self.assertIs(request(), response)
+        response.close.assert_not_called()

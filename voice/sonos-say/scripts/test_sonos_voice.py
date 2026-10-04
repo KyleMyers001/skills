@@ -1,4 +1,4 @@
-import contextlib
+import http.client
 import http.server
 import io
 import json
@@ -24,12 +24,7 @@ sys.modules.setdefault("soco.snapshot", _snapshot)
 import sonos_say  # noqa: E402
 
 
-TEST_CONFIG = {
-    "ELEVENLABS_VOICE_ID": "test_voice_123",
-    "SONOS_ROOM": "Test Room",
-    "ELEVENLABS_KEYCHAIN_SERVICE": "test-tts-service",
-    "ELEVENLABS_KEYCHAIN_ACCOUNT": "test-tts-account",
-}
+from sonos_test_support import TEST_CONFIG, loopback_server
 
 
 class ConfiguredTestCase(unittest.TestCase):
@@ -338,23 +333,6 @@ class TestVoicePayload(ConfiguredTestCase):
 
 
 class TestRedirectRejection(ConfiguredTestCase):
-    @contextlib.contextmanager
-    def _server(self, handler):
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        server.daemon_threads = True
-        thread = threading.Thread(
-            target=server.serve_forever,
-            kwargs={"poll_interval": 0.01},
-            daemon=True,
-        )
-        thread.start()
-        try:
-            yield server.server_address[1]
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
     def test_redirects_never_reach_destination(self):
         received = []
         initial_keys = []
@@ -379,7 +357,7 @@ class TestRedirectRejection(ConfiguredTestCase):
                 self.end_headers()
                 self.wfile.write(b"provider-sensitive-body")
 
-        with self._server(Handler) as origin, self._server(Handler) as dest:
+        with loopback_server(Handler) as origin, loopback_server(Handler) as dest:
             locations = (
                 f"http://localhost:{dest}/target",  # different host and port
                 f"http://127.0.0.1:{origin}/target",
@@ -420,7 +398,7 @@ class TestRedirectRejection(ConfiguredTestCase):
                 self.end_headers()
                 self.wfile.write(b"test-mp3")
 
-        with self._server(Handler) as port:
+        with loopback_server(Handler) as port:
             with patch("sonos_say.ELEVENLABS_TTS_BASE", f"http://127.0.0.1:{port}"):
                 destination = MagicMock()
                 sonos_say.synthesise_mp3(
@@ -448,3 +426,52 @@ class TestRedirectRejection(ConfiguredTestCase):
         for value in ("dummy-api-key", "private-test-text", "private-location",
                       "private-body"):
             self.assertNotIn(value, logged)
+
+
+class TestSynthesisBoundaries(unittest.TestCase):
+    def test_raw_network_and_body_errors_are_sanitized(self):
+        for error in (TimeoutError('private'), http.client.RemoteDisconnected('private'),
+                      http.client.IncompleteRead(b'private')):
+            with self.subTest(error=type(error).__name__), patch.object(sonos_say.voice_policy, 'tts_opener') as opener:
+                opener.return_value.open.side_effect = error
+                with self.assertRaisesRegex(RuntimeError, '^ElevenLabs request failed$'):
+                    sonos_say.synthesise_mp3('Hello', 'voice', 'eleven_v4', 'dummy', MagicMock())
+
+    def test_empty_body_rejected_before_file_write(self):
+        with patch.object(sonos_say.voice_policy, 'tts_opener') as opener:
+            resp = opener.return_value.open.return_value
+            resp.__enter__.return_value = resp
+            resp.status = 200
+            resp.headers.get.return_value = 'audio/mpeg'
+            resp.read.return_value = b''
+            dest = MagicMock()
+            with self.assertRaises(RuntimeError):
+                sonos_say.synthesise_mp3('Hello', 'voice', 'eleven_v4', 'dummy', dest)
+            dest.write_bytes.assert_not_called()
+
+    def test_delayed_headers_and_body_use_tts_budget(self):
+        # Real loopback boundaries; every handler is released and joined.
+        for phase in ('headers', 'body'):
+            release, finished = threading.Event(), threading.Event()
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *args): pass
+                def do_POST(self):
+                    try:
+                        self.rfile.read(int(self.headers['Content-Length']))
+                        if phase == 'body':
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'audio/mpeg')
+                            self.send_header('Content-Length', '4')
+                            self.end_headers()
+                            self.wfile.flush()
+                        release.wait(2)
+                    finally:
+                        finished.set()
+            server = loopback_server
+            try:
+                with server(Handler) as port, patch.object(sonos_say, 'ELEVENLABS_TTS_BASE', f'http://127.0.0.1:{port}'):
+                    with self.assertRaisesRegex(RuntimeError, '^ElevenLabs request failed$'):
+                        sonos_say.synthesise_mp3('Hello', 'voice', 'eleven_v4', 'dummy', MagicMock(), timeout=0.05)
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(2))

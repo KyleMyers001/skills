@@ -32,6 +32,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 import airpods_say
+from airpods_test_support import _Player, loopback_server, request
 from airpods_say import (
     _drain_ffplay,
     _Timing,
@@ -718,52 +719,6 @@ class TestPlayStreamDeviceChangeInLoop(unittest.TestCase):
 # Real HTTP framing, buffering, inactivity, and cancellation regressions
 # ---------------------------------------------------------------------------
 
-class _Player:
-    """State changes follow stdin EOF/termination, not poll call counts."""
-
-    def __init__(self, eof_status=0):
-        self.returncode = None
-        self.eof_status = eof_status
-        self.audio = bytearray()
-        self.closed = False
-        self.reaped = False
-        self.killed = False
-        self.on_write = None
-        self.stdin = self
-        self.stderr = io.BytesIO()
-
-    def fileno(self):
-        return 9999  # os.set_blocking is patched; no real player is launched
-
-    def write(self, data):
-        if self.on_write:
-            self.on_write(data)
-        self.audio.extend(data)
-        return len(data)
-
-    def flush(self):
-        pass
-
-    def close(self):
-        self.closed = True
-        if self.returncode is None:
-            self.returncode = self.eof_status
-
-    def poll(self):
-        return self.returncode
-
-    def terminate(self):
-        self.returncode = -15
-
-    def kill(self):
-        self.killed = True
-        self.returncode = -9
-
-    def wait(self, timeout=None):
-        self.reaped = True
-        return self.returncode
-
-
 class TestStreamReader(unittest.TestCase):
     def setUp(self):
         self.name = "Test AirPods"
@@ -1077,7 +1032,6 @@ class TestStreamReader(unittest.TestCase):
 
     def test_loopback_http_stall_is_bounded_and_closes_real_response(self):
         import http.server
-        from test_airpods_voice_payload import loopback_server, request
         finished = threading.Event()
         release = self.release
 

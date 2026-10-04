@@ -1,7 +1,9 @@
 import io
 import os
 import http.client
+import http.server
 import subprocess
+import threading
 import sys
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 import airpods_say
+from airpods_test_support import loopback_server
 
 _REAL_TTS = airpods_say.stream_tts
 _REAL_KEYCHAIN = airpods_say.get_keychain_password
@@ -346,3 +349,49 @@ class TestSymlinkInstallation(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("--voice-id", result.stdout)
+
+
+class TestPostHeaderOutputGate(unittest.TestCase):
+    def test_switch_during_withheld_headers_blocks_playback(self):
+        headers_waiting, release = threading.Event(), threading.Event()
+        state = ['Test AirPods']
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                headers_waiting.set()
+                release.wait(2)
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/mpeg')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+        def switch():
+            if headers_waiting.wait(2):
+                state[0] = 'Built-in Speakers'
+            release.set()
+
+        thread = threading.Thread(target=switch)
+        thread.start()
+        try:
+            with loopback_server(Handler) as port, \
+                    patch.dict(os.environ, {'ELEVENLABS_VOICE_ID': 'dummy-voice',
+                        'ELEVENLABS_KEYCHAIN_SERVICE': 'dummy-service',
+                        'ELEVENLABS_KEYCHAIN_ACCOUNT': 'dummy-account'}, clear=True), \
+                    patch.object(airpods_say, 'ELEVENLABS_STREAM_URL',
+                                 f'http://127.0.0.1:{port}/{{voice_id}}'), \
+                    patch.object(airpods_say, 'get_keychain_password', return_value='dummy-key'), \
+                    patch.object(airpods_say, 'find_ffplay', return_value='/fake/player'), \
+                    patch.object(airpods_say, 'get_default_output_device_name',
+                                 side_effect=lambda: state[0]), \
+                    patch.object(airpods_say, 'play_stream') as player, \
+                    patch('sys.stderr', io.StringIO()):
+                self.assertEqual(airpods_say.main(['Hello']), 2)
+                player.assert_not_called()
+        finally:
+            release.set()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())

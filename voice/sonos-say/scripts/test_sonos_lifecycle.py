@@ -7,6 +7,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock
+
+import test_sonos_say  # installs only this process's SoCo fixtures
+import sonos_say
 
 
 _CHILD = r'''
@@ -198,3 +202,12 @@ class TestScopedLifecycleSignals(unittest.TestCase):
                 result = self.run_child("temporary-exit", signame, failure="yes")
                 self.assertEqual(result["outcome"], "SONOS_RESTORE_FAILED")
                 self.assertEqual(result["mutations"], ["detach", "rejoin"])
+
+
+class TestCleanupIdempotence(unittest.TestCase):
+    def test_cleanup_action_is_not_replayed_after_interrupt(self):
+        action = MagicMock(side_effect=[KeyboardInterrupt(), None])
+        interrupts = []
+        self.assertFalse(sonos_say._run_cleanup_step(action, interrupts, 'fixed'))
+        action.assert_called_once()
+        self.assertEqual(len(interrupts), 1)

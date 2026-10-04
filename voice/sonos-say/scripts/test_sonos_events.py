@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import test_sonos_say  # installs only this process's SoCo fixtures
 import sonos_say as say
-from test_sonos_revision4 import Speaker
+from sonos_test_support import FakeSpeaker
 
 
 class TestTransportEventEvidence(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestTransportEventEvidence(unittest.TestCase):
     def test_polling_misses_playing_but_ordered_events_prove_completion(self):
         q = self.recorder(); self.arm(q)
         self.event(q, 1, 'PLAYING'); self.event(q, 2, 'STOPPED')
-        sp = Speaker(); sp.state = 'STOPPED'
+        sp = FakeSpeaker(); sp.state = 'STOPPED'
         self.assertTrue(say.wait_for_playback(sp, 1, events=q))
 
     def test_stopped_alone_and_initial_or_prior_uri_playing_never_succeed(self):
@@ -46,7 +46,7 @@ class TestTransportEventEvidence(unittest.TestCase):
                     self.event(q, 1, 'STOPPED'); self.event(q, 1, 'PLAYING')
                 if prior == 'stale': self.event(q, 0, 'PLAYING')
                 self.event(q, 2, 'STOPPED')
-                sp = Speaker()
+                sp = FakeSpeaker()
                 now = [0.0]
                 with patch.object(say.time, 'monotonic', side_effect=lambda: now[0]), \
                         patch.object(say.time, 'sleep', side_effect=lambda dt: now.__setitem__(0, now[0]+dt)):
@@ -63,7 +63,7 @@ class TestTransportEventEvidence(unittest.TestCase):
                 if bad == 'overflow':
                     for n in range(2, 200): self.event(q, n, 'PLAYING')
                 self.event(q, 200, 'STOPPED')
-                self.assertFalse(say.wait_for_playback(Speaker(), 1, events=q))
+                self.assertFalse(say.wait_for_playback(FakeSpeaker(), 1, events=q))
 
     def test_overall_deadline_includes_blocking_play_rpc(self):
         q = self.recorder()
@@ -72,7 +72,7 @@ class TestTransportEventEvidence(unittest.TestCase):
             self.arm(q)
             now[0] = 2
             self.event(q, 1, 'PLAYING'); self.event(q, 2, 'STOPPED')
-            self.assertFalse(say.wait_for_playback(Speaker(), 1, events=q))
+            self.assertFalse(say.wait_for_playback(FakeSpeaker(), 1, events=q))
 
     def test_soap_start_after_start_deadline_cannot_be_success(self):
         q = self.recorder()
@@ -80,7 +80,7 @@ class TestTransportEventEvidence(unittest.TestCase):
         with patch.object(say.time, 'monotonic', side_effect=lambda: now[0]):
             self.arm(q)
             now[0] = 9
-            sp = Speaker(); sp.uri = q.uri; sp.state = 'PLAYING'
+            sp = FakeSpeaker(); sp.uri = q.uri; sp.state = 'PLAYING'
             # Finite parent clock: any erroneous polling must reach overall expiry.
             def advance(dt): now[0] += dt
             with patch.object(say.time, 'sleep', side_effect=advance):
@@ -94,7 +94,7 @@ class TestTransportEventEvidence(unittest.TestCase):
                 with patch.object(say.time, 'monotonic', side_effect=lambda: now[0]):
                     self.arm(q)
                     if prior: self.event(q, 1, 'PLAYING')
-                    sp = Speaker(); sp.uri = q.uri
+                    sp = FakeSpeaker(); sp.uri = q.uri
                     sp.state = 'STOPPED' if prior else 'PLAYING'
                     def slow_media(args):
                         now[0] = 40
@@ -105,7 +105,7 @@ class TestTransportEventEvidence(unittest.TestCase):
     def test_lost_subscription_cannot_be_soap_success(self):
         q = self.recorder(); self.arm(q)
         q.failed = True
-        speaker = Speaker()
+        speaker = FakeSpeaker()
         speaker.get_current_transport_info = MagicMock(side_effect=[
             {'current_transport_state': 'PLAYING'}, {'current_transport_state': 'STOPPED'}])
         self.assertFalse(say.wait_for_playback(speaker, 1, events=q))
@@ -113,7 +113,7 @@ class TestTransportEventEvidence(unittest.TestCase):
     def test_unsupported_backend_is_refused(self):
         with patch.object(say, '_threaded_events_backend', side_effect=RuntimeError('unsupported')):
             with self.assertRaises(RuntimeError):
-                with say._TransportEvents(Speaker(), 'http://example.invalid/attempt'):
+                with say._TransportEvents(FakeSpeaker(), 'http://example.invalid/attempt'):
                     self.fail('unsupported backend was accepted')
 
 

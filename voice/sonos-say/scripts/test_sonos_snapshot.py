@@ -1,0 +1,64 @@
+"""Installed Snapshot source contracts, isolated from parent SDK stubs."""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import unittest
+
+
+class TestInstalledSnapshotContracts(unittest.TestCase):
+    def test_cloud_noop_and_supported_source_restoration_with_real_sdk(self):
+        code = r'''
+from types import SimpleNamespace
+from soco.snapshot import Snapshot
+import soco
+import sonos_say as say
+assert soco.__version__ == '0.31.2'
+class Device:
+    is_coordinator = True
+    volume, mute, bass, treble, loudness = 30, True, 0, 0, True
+    play_mode, cross_fade = 'NORMAL', False
+    def __init__(self, uri):
+        self.uri, self.state = uri, 'PLAYING'
+        self.position, self.restores = 2, 0
+        self.avTransport = SimpleNamespace(GetMediaInfo=lambda args:
+            {'CurrentURI':self.uri, 'CurrentURIMetaData':''})
+    def get_current_transport_info(self):
+        return {'current_transport_state':self.state}
+    def get_current_track_info(self):
+        return {'uri':'http://example.invalid/per-track', 'playlist_position':str(self.position), 'position':'00:00:10'}
+    def play_uri(self, uri, metadata='', start=True):
+        self.uri, self.state = uri, 'PLAYING' if start else 'STOPPED'
+    def play_from_queue(self, index, start=True):
+        self.position = index + 1
+        self.uri = 'x-rincon-queue:target#0'
+        self.state = 'PLAYING' if start else 'STOPPED'
+    def seek(self, position): pass
+    def pause(self): self.state = 'PAUSED_PLAYBACK'
+    def stop(self): self.state = 'STOPPED'
+    def play(self): self.state = 'PLAYING'
+for uri in ('x-rincon-queue:target#0', 'http://example.invalid/radio', 'x-file-cifs://example.invalid/file'):
+    device = Device(uri)
+    snapshot = Snapshot(device); snapshot.snapshot()
+    device.play_uri('http://example.invalid/announcement')
+    device.mute = False; device.volume = 35
+    failed, interrupt = say._restore_after_announcement(device, snapshot, True, 30, None, False)
+    assert not failed and interrupt is None
+    assert device.uri == uri and device.state == 'PLAYING' and device.mute and device.volume == 30
+    if '#0' in uri: assert device.position == 2
+cloud = Device('x-rincon-queue:target#6')
+snapshot = Snapshot(cloud); snapshot.snapshot()
+cloud.play_uri('http://example.invalid/announcement')
+snapshot.restore(fade=False)
+assert snapshot.is_playing_cloud_queue
+assert cloud.uri == 'http://example.invalid/announcement'  # SDK's known unsupported no-op
+try: say._check_source_uri(snapshot.media_uri)
+except say.SonosSayError as error: assert error.code == 'SONOS_SOURCE_UNSUPPORTED'
+else: raise AssertionError('cloud source accepted')
+print('cloud-noop reproduced; local queue/radio/file restored')
+'''
+        result = subprocess.run([sys.executable, '-c', code], env={
+            'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent)},
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cloud-noop reproduced', result.stdout)
