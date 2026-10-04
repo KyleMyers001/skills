@@ -1,9 +1,9 @@
 {
   "planner": {
     "kind": "pi",
-    "model": "openai-codex/gpt-6-astra",
-    "thinking": "high",
-    "expect_startup": ["gpt-6-astra", "gpt-6-astra • high"]
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "max",
+    "expect_startup": ["gpt-6.1-sol", "gpt-6.1-sol • max"]
   },
   "developer": {
     "kind": "pi",

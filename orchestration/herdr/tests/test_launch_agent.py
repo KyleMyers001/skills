@@ -15,6 +15,11 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS / "launch-agent.py"
+PROFILE_PATHS = {
+    "gate": SCRIPTS.parents[2] / "gate/references/default-models.json",
+    "orchestrate-ticket": (SCRIPTS.parents[1]
+                           / "orchestrate-ticket/references/default-models.json"),
+}
 sys.path.insert(0, str(SCRIPTS))
 from herdr_launch import checks, cli, client, errors, launcher, session  # noqa: E402
 from herdr_launch.process import CommandResult  # noqa: E402
@@ -972,6 +977,89 @@ class LaunchAgentTests(unittest.TestCase):
                 if not submitted:
                     self.assertEqual(data["startup"], banner)
                     self.assertTrue(data["inspection_required"])
+
+    def test_workflow_profile_pins_and_permissions(self):
+        expected = {
+            "gate": {
+                "reviewer": ("gpt-6.1-sol", "high", "edit,write"),
+                "e2e_planner": ("gpt-6.1-sol", "xhigh", None),
+                "qa": ("gpt-6-luna", "xhigh", "edit,write"),
+                "auditor": ("gpt-6-luna", "xhigh", "edit,write"),
+                "developer": ("gpt-6.1-sol", "high", None),
+            },
+            "orchestrate-ticket": {
+                "planner": ("gpt-6.1-sol", "max", None),
+                "developer": ("gpt-6.1-sol", "high", None),
+            },
+        }
+        for workflow, roles in expected.items():
+            profiles = json.loads(PROFILE_PATHS[workflow].read_text(
+                encoding="utf-8"))
+            self.assertEqual(set(profiles), set(roles))
+            for role, (model, thinking, exclusions) in roles.items():
+                with self.subTest(workflow=workflow, role=role):
+                    profile = profiles[role]
+                    self.assertEqual(profile["kind"], "pi")
+                    self.assertEqual(profile["model"], f"openai-codex/{model}")
+                    self.assertEqual(profile.get("thinking"), thinking)
+                    self.assertEqual(profile["expect_startup"],
+                                     [model, f"{model} • {thinking}"])
+                    if exclusions is None:
+                        self.assertNotIn("exclude_tools", profile)
+                    else:
+                        self.assertEqual(profile["exclude_tools"], exclusions)
+
+    def test_workflow_profiles_forward_flags_and_gate_one_prompt(self):
+        changed = [
+            ("gate", "e2e_planner", "gpt-6.1-sol", "xhigh", "gpt-6-astra"),
+            ("gate", "qa", "gpt-6-luna", "xhigh", "gpt-5.6-terra"),
+            ("gate", "auditor", "gpt-6-luna", "xhigh", "gpt-5.6-terra"),
+            ("orchestrate-ticket", "planner", "gpt-6.1-sol", "max",
+             "gpt-6-astra"),
+        ]
+        for workflow, role, model, thinking, wrong_model in changed:
+            profile = json.loads(PROFILE_PATHS[workflow].read_text(
+                encoding="utf-8"))[role]
+            native = ["--model", profile["model"]]
+            if profile.get("thinking"):
+                native += ["--thinking", profile["thinking"]]
+            if "exclude_tools" in profile:
+                native += ["--exclude-tools", profile["exclude_tools"]]
+            expect = [arg for value in profile["expect_startup"]
+                      for arg in ("--expect-startup", value)]
+            wrong_thinking = "xhigh" if thinking == "max" else "max"
+            banners = (
+                (f"{model} • {thinking}", True),
+                (f"{wrong_model} • {thinking}", False),
+                (f"{model} • high", False),
+                (f"{model} • {wrong_thinking}", False),
+                (model, False),
+                (f"{model} • high\nExtension status: {thinking}", False),
+            )
+            for banner, submitted in banners:
+                with self.subTest(workflow=workflow, role=role, banner=banner):
+                    steps = self.happy_steps(native=native)
+                    steps[-1] = self.read(banner)
+                    if submitted:
+                        steps.append(self.prompt_steps()[-1])
+                    result, calls = self.run_launcher(
+                        steps, ["--kind", profile["kind"], "--prompt",
+                                "Review the diff", *expect, "--", *native],
+                        allow_prompt=submitted)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    data = json.loads(result.stdout)
+                    self.assertEqual(data["submitted"], submitted)
+                    self.assertEqual(data["submission_blocked"],
+                                     None if submitted else "startup_unexpected")
+                    prompts = [call for call in calls
+                               if call[2:4] == ["agent", "prompt"]]
+                    self.assertEqual(len(prompts), 1 if submitted else 0)
+                    self.assertEqual(calls, [item["args"] for item in steps])
+                    self.assertEqual(calls[3][-len(native):], native)
+                    if not submitted:
+                        self.assertEqual(data["startup"], banner)
+                        self.assertTrue(data["inspection_required"])
 
     def test_expected_startup_text_is_validated_before_herdr(self):
         for extra in (["--expect-startup", "fable"],
