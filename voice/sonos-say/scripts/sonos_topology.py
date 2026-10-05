@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 import http.client
 import ipaddress
@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from typing import Any, Callable, Optional
 
 
@@ -42,6 +43,55 @@ def bounded_soco_request(seconds: float):
     finally:
         config.REQUEST_TIMEOUT = previous_timeout
         config.ZGT_EVENT_FALLBACK = previous_fallback
+
+
+@contextmanager
+def _service_deadline(service: Any, deadline: float, empty_action: Optional[str]):
+    """Guard an instance's dispatch, including actions cached by SoCo."""
+    import soco.config as config
+    missing = object()
+    previous = vars(service).get("send_command", missing)
+    dispatch = service.send_command
+
+    def bounded(action, args=None, **kwargs):
+        remaining = deadline - time.monotonic()
+        if remaining < TOPOLOGY_MIN_READ_SECONDS:
+            raise TimeoutError("Sonos cleanup RPC budget exhausted")
+        timeout = min(TOPOLOGY_VERIFY_TIMEOUT, remaining)
+        for requested in (config.REQUEST_TIMEOUT, kwargs.get("timeout")):
+            if requested is not None:
+                timeout = min(timeout, requested)
+        # SDK role getters otherwise fetch service metadata under a fixed 10s
+        # timeout, outside the SOAP request timeout we control here.
+        if args is None and action == empty_action:
+            args = []
+        kwargs["timeout"] = timeout
+        return dispatch(action, args, **kwargs)
+
+    service.send_command = bounded
+    try:
+        yield
+    finally:
+        if previous is missing:
+            del service.send_command
+        else:
+            service.send_command = previous
+
+
+@contextmanager
+def soco_deadline(speaker: Any, deadline: float):
+    """Stop compound cleanup at RPC boundaries; never leave a mutating worker."""
+    with ExitStack() as stack:
+        stack.enter_context(bounded_soco_request(deadline - time.monotonic()))
+        for name, empty_action in (
+            ("avTransport", None), ("renderingControl", None),
+            ("zoneGroupTopology", "GetZoneGroupState"),
+            ("deviceProperties", "GetHouseholdID"),
+        ):
+            stack.enter_context(_service_deadline(
+                getattr(speaker, name), deadline, empty_action,
+            ))
+        yield
 
 
 class _Deadline:
@@ -315,6 +365,18 @@ def _fetch_device_description(connection: http.client.HTTPConnection) -> bytes:
     return response.read(DEVICE_DESCRIPTION_LIMIT + 1)
 
 
+def _validate_description_xml(body: bytes) -> None:
+    """Reject declarations before expansion, regardless of XML encoding."""
+    def reject(*args):
+        raise ValueError("device description contains a forbidden declaration")
+
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = reject
+    parser.EntityDeclHandler = reject
+    parser.ExternalEntityRefHandler = reject
+    parser.Parse(body, True)
+
+
 def _read_device_uid(speaker: Any) -> str:
     """Read UDN directly: even get_speaker_info(refresh=True) uses cached uid.
 
@@ -351,9 +413,7 @@ def _read_device_uid(speaker: Any) -> str:
         body = outcome["body"]
         if len(body) > DEVICE_DESCRIPTION_LIMIT:
             raise ValueError("device description is too large")
-        folded = body.upper()
-        if b"<!DOCTYPE" in folded or b"<!ENTITY" in folded:
-            raise ValueError("device description contains a forbidden declaration")
+        _validate_description_xml(body)
         udn = ET.fromstring(body).findtext(
             "{urn:schemas-upnp-org:device-1-0}device/"
             "{urn:schemas-upnp-org:device-1-0}UDN"

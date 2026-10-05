@@ -14,17 +14,25 @@ TEST_CONFIG = {
 }
 
 
+class FakeService(SimpleNamespace):
+    """High-level speaker fakes expose the SDK's guardable dispatch boundary."""
+
+    def send_command(self, action, args=None, **kwargs):
+        raise AssertionError(f'Unexpected low-level fixture action: {action}')
+
+
 class FakeSpeaker:
     _visible = True
     _is_satellite = False
     _has_satellites = False
     _household_id = 'household'
     ip_address = '192.0.2.2'
-    # Payload content is irrelevant: FakeZoneGroupState derives groups live.
-    zoneGroupTopology = SimpleNamespace(
-        GetZoneGroupState=lambda args, timeout: {'ZoneGroupState': ''})
-
     def __init__(self, uid='target'):
+        # Payload content is irrelevant: FakeZoneGroupState derives groups live.
+        self.zoneGroupTopology = FakeService(
+            GetZoneGroupState=lambda args, timeout: {'ZoneGroupState': ''})
+        self.renderingControl = FakeService()
+        self.deviceProperties = FakeService()
         self._uid = uid  # Cached parser identity, like SoCo.
         self.device_uid = uid  # Independent identity at this IP.
         self.volume = 30
@@ -33,8 +41,10 @@ class FakeSpeaker:
         self.state = 'STOPPED'
         self.zone_group_state = FakeZoneGroupState(self)
         self.group = SimpleNamespace(coordinator=self, members=[self])
-        self.avTransport = SimpleNamespace(GetMediaInfo=self.media,
-                                           SetAVTransportURI=MagicMock(side_effect=self.set_uri))
+        self.avTransport = FakeService(
+            GetMediaInfo=self.media,
+            SetAVTransportURI=MagicMock(side_effect=self.set_uri),
+        )
         self.play_uri = MagicMock(side_effect=self.play)
         self.join = MagicMock(side_effect=self.regroup)
         self.unjoin = MagicMock(side_effect=self.isolate)

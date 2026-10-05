@@ -41,6 +41,9 @@ restoring = False
 mute_state, volume_state = [True], [30]
 target, coord = MagicMock(), MagicMock()
 for uid, sp in (("target", target), ("coord", coord)):
+    for service in ('avTransport', 'renderingControl', 'zoneGroupTopology',
+                    'deviceProperties'):
+        getattr(sp, service).send_command = MagicMock()
     sp.uid = sp._uid = uid
     sp._is_satellite, sp._has_satellites = False, False
     sp.zone_group_state.has_subscriptions = False

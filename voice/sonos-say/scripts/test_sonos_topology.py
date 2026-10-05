@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -606,6 +607,88 @@ class TestFreshTopology(unittest.TestCase):
         self.assertIs(self.household.live["target"].coordinator, self.target)
 
 
+class TestCommandDeadline(unittest.TestCase):
+    def setUp(self):
+        self.now = 0.0
+        clock = patch.object(topology.time, 'monotonic', side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.calls = []
+
+        class Service:
+            def send_command(service, action, args=None, **kwargs):
+                self.calls.append((service, action, args, kwargs))
+                return {'ok': True}
+
+        self.services = [Service() for _ in range(4)]
+        self.other = Service()
+        self.speaker = SimpleNamespace(**dict(zip(
+            ('avTransport', 'renderingControl', 'zoneGroupTopology',
+             'deviceProperties'), self.services,
+        )))
+
+    def test_each_dispatch_obeys_deadline_and_explicit_stricter_timeout(self):
+        service = self.speaker.avTransport
+        with topology.soco_deadline(self.speaker, deadline=6):
+            service.send_command('Stop', [('InstanceID', 0)])
+            self.now = 4
+            service.send_command('Stop', [], timeout=10)
+            service.send_command('Stop', [], timeout=0.1)
+            self.now = 5.6  # Less than one usable request window remains.
+            with self.assertRaises(TimeoutError):
+                service.send_command('Stop', [])
+            self.now = 6
+            with self.assertRaises(TimeoutError):
+                service.send_command('Stop', [])
+        self.assertEqual([call[3]['timeout'] for call in self.calls], [5, 2, 0.1])
+
+    def test_configured_stricter_timeout_also_limits_explicit_calls(self):
+        import soco.config as config
+        with patch.object(config, 'REQUEST_TIMEOUT', 0.25), \
+                patch.object(config, 'ZGT_EVENT_FALLBACK', True):
+            with topology.soco_deadline(self.speaker, deadline=5):
+                self.assertIs(config.ZGT_EVENT_FALLBACK, False)
+                self.speaker.avTransport.send_command('Stop', [], timeout=5)
+            self.assertEqual(config.REQUEST_TIMEOUT, 0.25)
+            self.assertIs(config.ZGT_EVENT_FALLBACK, True)
+        self.assertEqual(self.calls[0][3]['timeout'], 0.25)
+
+    def test_scoped_services_restore_exact_dispatch_state_on_every_exit(self):
+        custom = lambda *args, **kwargs: {'custom': True}
+        self.speaker.renderingControl.send_command = custom
+        for error in (None, RuntimeError('failed'), KeyboardInterrupt(), SystemExit(143)):
+            with self.subTest(error=error):
+                try:
+                    with topology.soco_deadline(self.speaker, deadline=5):
+                        self.assertIsNot(self.speaker.renderingControl.send_command,
+                                         custom)
+                        for service in self.services:
+                            self.assertIn('send_command', vars(service))
+                        self.other.send_command('Stop', [])
+                        self.assertEqual(self.calls[-1][3], {})
+                        if error is not None:
+                            raise error
+                except BaseException as caught:
+                    self.assertIs(caught, error)
+                self.assertIs(self.speaker.renderingControl.send_command, custom)
+                for service in (self.services[0], *self.services[2:]):
+                    self.assertNotIn('send_command', vars(service))
+
+    def test_implicit_topology_and_household_reads_have_explicit_empty_args(self):
+        with topology.soco_deadline(self.speaker, deadline=5):
+            self.speaker.zoneGroupTopology.send_command('GetZoneGroupState')
+            self.speaker.deviceProperties.send_command('GetHouseholdID')
+        self.assertEqual([call[2] for call in self.calls], [[], []])
+
+    def test_partial_guard_installation_is_unwound(self):
+        del self.speaker.deviceProperties
+        with self.assertRaises(AttributeError):
+            with topology.soco_deadline(self.speaker, deadline=5):
+                self.fail('incomplete speaker accepted')
+        for service in self.services:
+            self.assertNotIn('send_command', vars(service))
+
+
 class TestIdentityDescription(unittest.TestCase):
     def setUp(self):
         self.target = FakeSpeaker()
@@ -654,6 +737,39 @@ class TestIdentityDescription(unittest.TestCase):
             topology.verify_target_identity(self.plan)
         self.assertEqual(self.connection.return_value.close.call_count, 5)
 
+    def test_valid_unicode_encodings_preserve_identity(self):
+        for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+            with self.subTest(encoding=encoding):
+                declared = 'utf-16' if encoding.startswith('utf-16') else 'utf-8'
+                xml = (f'<?xml version="1.0" encoding="{declared}"?>'
+                       '<root xmlns="urn:schemas-upnp-org:device-1-0">'
+                       '<device><UDN>uuid:target</UDN></device></root>')
+                self.response.read.return_value = xml.encode(encoding)
+                topology.verify_target_identity(self.plan)
+
+    def test_encoded_declarations_never_reach_identity_extraction(self):
+        declarations = (
+            '<!DOCTYPE root [<!ENTITY identity "target">]>',
+            '<!DOCTYPE root SYSTEM "http://example.invalid/external.dtd">',
+            '<!DOCTYPE root [<!ENTITY identity SYSTEM "file:///not-read">]>',
+        )
+        for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+            for declaration in declarations:
+                with self.subTest(encoding=encoding, declaration=declaration):
+                    declared = ('utf-16' if encoding.startswith('utf-16')
+                                else 'utf-8')
+                    xml = (f'<?xml version="1.0" encoding="{declared}"?>'
+                           f'{declaration}'
+                           '<root xmlns="urn:schemas-upnp-org:device-1-0">'
+                           '<device><UDN>uuid:&identity;</UDN></device></root>')
+                    self.response.read.return_value = xml.encode(encoding)
+                    with patch.object(topology.ET, 'fromstring',
+                                      wraps=topology.ET.fromstring) as parse:
+                        with self.assertRaises(topology.TopologyError):
+                            topology.verify_target_identity(self.plan)
+                        parse.assert_not_called()
+        self.assertEqual(self.connection.return_value.close.call_count, 12)
+
     def test_doctype_or_entity_description_is_rejected_unparsed(self):
         bodies = (
             b'<!DOCTYPE foo [<!ENTITY x "target">]><root '
@@ -679,33 +795,56 @@ class TestIdentityDescription(unittest.TestCase):
 
 class TestIdentityDeadline(unittest.TestCase):
     def test_trickling_description_cannot_outlast_one_deadline(self):
+        received, sent, stop, finished = (threading.Event() for _ in range(4))
+
         class Trickle(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
             def do_GET(self):
+                received.set()
                 self.send_response(200)
+                self.send_header('Content-Length', '100')
                 self.end_headers()
                 try:
-                    for _ in range(50):  # Each byte restarts a socket timeout.
+                    for _ in range(100):  # Bytes arrive inside the socket timeout.
                         self.wfile.write(b' ')
                         self.wfile.flush()
-                        time.sleep(0.1)
+                        sent.set()
+                        if stop.wait(0.05):
+                            break
                 except OSError:
                     pass
+                finally:
+                    self.close_connection = True
+                    finished.set()
 
             def log_message(self, *args):
                 pass
 
         target = FakeSpeaker()
         target.ip_address = '127.0.0.1'
+        connection_type = http.client.HTTPConnection
         with loopback_server(Trickle) as port:
             def connect(host, _port, timeout):
-                return http.client.HTTPConnection(host, port, timeout=timeout)
+                return connection_type(host, port, timeout=timeout)
 
-            with patch.object(topology, 'TOPOLOGY_VERIFY_TIMEOUT', 0.5), \
-                    patch.object(topology.http.client, 'HTTPConnection', connect):
-                started = time.monotonic()
-                with self.assertRaises(topology.TopologyError):
-                    topology._read_device_uid(target)
-                self.assertLess(time.monotonic() - started, 2)
+            try:
+                with patch.object(topology, 'TOPOLOGY_VERIFY_TIMEOUT', 0.5), \
+                        patch.object(topology.http.client, 'HTTPConnection', connect):
+                    started = time.monotonic()
+                    with self.assertRaises(topology.TopologyError) as raised:
+                        topology._read_device_uid(target)
+                    elapsed = time.monotonic() - started
+                self.assertTrue(received.is_set(), 'HTTP request never arrived')
+                self.assertTrue(sent.is_set(), 'No response bytes were delivered')
+                self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+                self.assertIn('timed out', str(raised.exception.__cause__))
+                self.assertGreaterEqual(elapsed, 0.4)
+                self.assertLess(elapsed, 2)
+            finally:
+                stop.set()
+                if received.is_set():
+                    self.assertTrue(finished.wait(2), 'Server worker did not exit')
 
 
 class TestTopologyReadRetries(unittest.TestCase):
@@ -1065,6 +1204,49 @@ class TestInstalledTopologyContracts(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(expected, result.stdout)
+
+    def test_deadline_guards_cached_sdk_actions_without_metadata_fetches(self):
+        code = r'''
+from types import SimpleNamespace
+from unittest.mock import patch
+import soco
+import soco.config
+import soco.services
+import sonos_topology as topology
+assert soco.__version__ == '0.31.2'
+speaker = soco.SoCo('192.0.2.2')
+# Cache dispatchers, but not service descriptions, before applying the guard.
+actions = (speaker.deviceProperties.GetHouseholdID,
+           speaker.zoneGroupTopology.GetZoneGroupState)
+calls = []
+def post(url, headers, data, timeout):
+    calls.append(headers['SOAPACTION'].split('#')[-1])
+    assert timeout == 2 and soco.config.ZGT_EVENT_FALLBACK is False
+    return SimpleNamespace(status_code=200, headers={}, text=(
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+        '<s:Body><Response><Result>test</Result></Response></s:Body></s:Envelope>'))
+with patch.object(topology.time, 'monotonic', return_value=3), \
+     patch.object(soco.services.requests, 'post', side_effect=post), \
+     patch.object(soco.services.requests, 'get', side_effect=AssertionError('metadata GET')):
+    with topology.soco_deadline(speaker, deadline=5):
+        for action in actions:
+            assert action() == {'Result': 'test'}
+assert calls == ['GetHouseholdID', 'GetZoneGroupState']
+assert speaker.deviceProperties._actions is None
+assert speaker.zoneGroupTopology._actions is None
+assert 'send_command' not in vars(speaker.deviceProperties)
+assert 'send_command' not in vars(speaker.zoneGroupTopology)
+print('cached dispatch guarded; implicit metadata fetch avoided')
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', code],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent),
+                 'PYTHONDONTWRITEBYTECODE': '1'},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cached dispatch guarded; implicit metadata fetch avoided',
+                      result.stdout)
 
     def test_owned_satellites_and_multiroom_partition_with_real_sdk(self):
         self.run_contract('stable', 'owned satellites accepted; same-named second room refused')

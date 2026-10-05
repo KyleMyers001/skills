@@ -107,7 +107,8 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   captured target. Do not fetch device-description before a topology-backed
   restore or rejoin. Fetch it only to authorize local mute and volume when
   topology is unavailable or unsafe; a mismatch or failed read skips those
-  writes. Reject a description that declares DOCTYPE or ENTITY before parsing.
+  writes. Reject DOCTYPE/entity declarations before expansion or UDN extraction,
+  including UTF-16 descriptions; do not rely on an ASCII byte scan.
   A different topology UUID is refused. A cached device-UID change alone is not
   a transport refusal. Standalone and bonded targets get one more isolation
   check after the last cleanup write. Do not run that check after a rejoin, and
@@ -115,13 +116,18 @@ limits across blocking SoCo calls. `--help` requires no configuration.
 - Unavailable topology reads retry for at most five seconds per check.
   A missing group or role fails isolation checks immediately; post-unjoin,
   pre-join, and post-join convergence waits retry such mid-transition samples
-  within their deadline. Each SoCo observation or cleanup RPC is capped at the
-  remaining check time, between half a second and five seconds, and must not
-  open a ZoneGroupTopology subscription. Recovery's pre-join wait, join RPC, and
-  post-join wait each get their own five seconds. Cleanup starts no further step
-  after 45 seconds; local steps for a detached member stop 15 seconds earlier so
-  the rejoin is still attempted. Live identity reads end after five seconds
-  in total, even if the device trickles its response. Unsafe topology
+  within their deadline. Topology observations use request timeouts between
+  half a second and five seconds; no ZoneGroupTopology subscription is opened.
+  Recovery's pre-join wait, join RPC, and post-join wait each get their own five
+  seconds. Cleanup starts no further step after 45 seconds. A scoped SDK dispatch
+  guard checks time before each target RPC, including Snapshot's internal calls,
+  and caps its timeout at the remaining budget (at most five seconds). Local
+  restoration for a detached member reserves 15 seconds for safe regrouping;
+  it starts no RPC with less than half a second left. Exhaustion is a restore
+  failure even if regrouping succeeds. Socket timeouts are not total wall-clock
+  limits: an in-flight trickling SOAP response can still overrun this budget.
+  Live identity reads separately end after five seconds in total, even if the
+  device trickles its response. Unsafe topology
   is never retried into acceptance, and mutating RPCs are never replayed.
   Refusal before the first state-changing RPC incurs no restoration writes; an
   attempted unjoin still requires regroup-only recovery.

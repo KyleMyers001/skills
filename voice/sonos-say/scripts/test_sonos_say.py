@@ -113,6 +113,9 @@ def tearDownModule():
 
 def _set_standalone(sp: MagicMock) -> MagicMock:
     """Give a mock speaker an explicit, valid standalone topology."""
+    for name in ('avTransport', 'renderingControl', 'zoneGroupTopology',
+                 'deviceProperties'):
+        getattr(sp, name).send_command = MagicMock()
     sp.uid = sp._uid = "RINCON_TEST_TARGET"
     sp._is_satellite = False
     sp._has_satellites = False
@@ -728,8 +731,8 @@ class TestGroupedAnnouncement(unittest.TestCase):
 
     def _grouped_speakers(self):
         events: list[str] = []
-        target = MagicMock()
-        coordinator = MagicMock()
+        target = _set_standalone(MagicMock())
+        coordinator = _set_standalone(MagicMock())
         target.uid = target._uid = "RINCON_TARGET"
         target._is_satellite = False
         target._has_satellites = False

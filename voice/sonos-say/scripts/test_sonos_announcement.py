@@ -16,6 +16,7 @@ from sonos_test_support import (
 
 _REAL_WAIT = say.wait_for_playback
 _REAL_EVENTS = say._TransportEvents
+_REAL_READ_DEVICE_UID = topology._read_device_uid
 
 
 class TestAnnouncementLifecycle(unittest.TestCase):
@@ -682,6 +683,59 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.assertEqual(self.snapshots[-1].restores, 0)
         self.speaker.join.assert_not_called()
         self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+
+    def test_encoded_entity_cannot_authorize_fallback_rendering_writes(self):
+        def unsafe(*args, **kwargs):
+            self.add_room()
+            return True
+
+        self.wait.side_effect = unsafe
+        xml = ('<?xml version="1.0" encoding="utf-16"?>'
+               '<!DOCTYPE root [<!ENTITY identity "target">]>'
+               '<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+               '<UDN>uuid:&identity;</UDN></device></root>').encode('utf-16')
+        with patch.object(topology, '_read_device_uid', _REAL_READ_DEVICE_UID), \
+                patch('http.client.HTTPConnection') as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status, response.read.return_value = 200, xml
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        connection.return_value.request.assert_called_once()
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (False, 35))
+        self.assertEqual(self.snapshots[-1].restores, 0)
+        self.speaker.join.assert_not_called()
+
+    def test_rpc_budget_failure_rejoins_once_and_wins_over_playback_interrupt(self):
+        coord = self.group()
+        self.wait.side_effect = KeyboardInterrupt()
+        now, dispatches = [0.0], []
+
+        def dispatch(action, args, timeout=5):
+            dispatches.append((action, now[0], timeout))
+            duration = min(4.9, timeout)
+            now[0] += duration
+            if duration < 4.9:
+                raise TimeoutError('request timed out')
+
+        self.speaker.avTransport.send_command = dispatch
+
+        def slow_restore(snapshot, **kwargs):
+            snapshot.restores += 1
+            for _ in range(20):
+                snapshot.device.avTransport.send_command('RestorePart', [])
+
+        with patch.object(FakeSnapshot, 'restore', slow_restore), \
+                patch.object(say.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[-1].restores, 1)
+        self.assertTrue(dispatches)
+        self.assertTrue(all(start < 30 for _, start, _ in dispatches))
+        self.assertLessEqual(now[0], 30)
+        self.speaker.join.assert_called_once_with(coord)
+        self.assertIs(self.speaker.avTransport.send_command, dispatch)
 
     def test_grouped_after_snapshot_restore_is_not_uri_cleared(self):
         self.speaker.uri = ''

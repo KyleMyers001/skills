@@ -126,11 +126,11 @@ composes implicit arguments by downloading the service description under a fixed
 processed payload primes SoCo's cache so the group lookup reads that sample
 without polling again. A 501 response (SoCo documents this for households of
 about 20+ players) fails immediately: SoCo's ZGT event fallback would open a
-topology subscription, which this skill never does. Eligibility uses copied roles from that same
-processed payload without public role getters, which can poll individual
-satellites and introduce new observations. No surround/sub needs to answer a
-separate role request. A changed `processed_count` during copying, or unavailable
-observation identity, still fails closed. This fetches fresh state for
+topology subscription, which this skill never does. Eligibility uses copied roles
+from that same processed payload without public role getters, which can poll
+individual satellites and introduce new observations. No surround/sub needs to
+answer a separate role request. A changed `processed_count` during copying, or
+unavailable observation identity, still fails closed. This fetches fresh state for
 initial/pre-unjoin/pre-snapshot/pre-playback checks and every convergence
 sample, including coordinator-side restoration checks. Read/processing failures
 fail closed. Active topology subscriptions can replace polled state at any time
@@ -176,10 +176,26 @@ is unsafe or remains unavailable, cleanup skips transport writes and does not jo
 attempts safe independent target-local mute/volume recovery, and reports
 `SONOS_RESTORE_FAILED`. It does not repair bonds or join an unrelated group.
 Cleanup starts no further step after 45 seconds. When a detached member awaits
-regrouping, local steps stop 15 seconds earlier (pre-join wait, join, post-join
-wait) so slow restoration cannot skip the rejoin. `Snapshot.restore` remains one
-step and is not split between its internal calls. Each cleanup RPC uses the same
-five-second SoCo request cap and does not enable topology-event fallback.
+regrouping, local restoration reserves 15 seconds for the pre-join wait, join,
+and post-join wait. A scoped `soco_deadline` guard intercepts `send_command` on
+only the target's AVTransport, RenderingControl, ZoneGroupTopology, and
+DeviceProperties service instances. It checks the absolute deadline before every
+RPC, including Snapshot's internal calls and `finally` rendering restoration.
+The request timeout is the smallest of five seconds, remaining time, and any
+stricter configured or explicit timeout. With less than half a second remaining,
+no new target RPC starts. Known implicit zero-argument topology/household reads
+use explicit empty arguments to avoid an uncapped service-description fetch.
+Prior instance dispatch attributes and SoCo configuration are restored on every
+exit, including partial setup and interruption; no SDK class is patched.
+
+Snapshot remains responsible for source, queue, EQ, and transport semantics.
+Exhaustion stops further local RPCs and reports `SONOS_RESTORE_FAILED`; regrouping
+gets its own guard and still requires fresh safety evidence. It cannot turn a
+partial restoration into success. Compound URI clearing and read-back steps use
+the same dispatch guard. No mutating worker continues in the background.
+Socket timeouts are not whole-exchange deadlines: an in-flight trickling SOAP
+response can exceed the budget. This prevents cumulative RPC starvation, not
+arbitrary wall-clock overruns, and does not enable topology-event fallback.
 
 Device-description is not fetched before a topology-backed restore or rejoin.
 A fresh topology poll that still reports the captured UUID authorizes transport,
@@ -189,10 +205,14 @@ mute and volume when topology is unavailable or unsafe. SoCo's `uid` and even
 `get_speaker_info(refresh=True)` reuse the cached UID and cannot authorize those
 writes. A cached device-UID change alone is not a transport refusal. A different
 topology UUID is still refused. Identity reads have a five-second socket timeout,
-a 64 KiB body limit, strict UDN parsing, and no redirect/proxy following. Any
-DOCTYPE or ENTITY declaration is rejected before XML parsing. Socket timeouts
-restart on every received byte, so the request runs in a worker thread with one
-five-second deadline for the whole exchange; a trickling responder is cut off.
+a 64 KiB body limit, strict UDN parsing, and no redirect/proxy following. An
+encoding-aware Expat preflight rejects DOCTYPE/entity declarations and external
+entity references before expansion; only declaration-free, well-formed bytes
+reach ElementTree UDN extraction. Both parsers receive the same bytes. UTF-8 and
+UTF-16 (either byte order) remain supported; no new dependency is used. Socket
+timeouts restart on every received byte, so the request runs in a worker thread
+with one five-second deadline for the whole exchange; a trickling responder is
+cut off.
 A failed or mismatched description skips local writes. A successful snapshot
 already restores mute; cleanup does not redundantly set it again. Volume is
 written explicitly because it was captured separately and is read back.
@@ -205,8 +225,9 @@ fail.
 Safe cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring
 volume. An empty saved URI is cleared on idle standalone/bonded targets, not detached
 members awaiting regrouping. Internal callers without a captured room plan clear
-only a confirmed coordinator; an unreadable coordinator state is a failure. Mute, volume, source/transport where meaningful,
-and cleared-URI read-back errors or mismatches are failures. Queue source checks
+only a confirmed coordinator; an unreadable coordinator state is a failure.
+Mute, volume, source/transport where meaningful, and cleared-URI read-back errors
+or mismatches are failures. Queue source checks
 use `GetMediaInfo.CurrentURI`, not a per-track URI. Cleanup continues
 attempting independent restoration steps after failures. Successful API calls are
 not proof of frame-accurate queue/seek restoration; brief interruption is inherent.
@@ -227,8 +248,10 @@ Only observed PLAYING followed by STOPPED counts as completion. TRANSITIONING
 alone does not prove playback started. Unknown/malformed telemetry, read errors,
 pausing, non-start, and timeout produce `SONOS_PLAYBACK_FAILED` after cleanup.
 Playback deadlines bound polling, not every discovery or synthesis call.
-Topology polls and cleanup RPCs are separately capped at five seconds, and
-cleanup starts no further step after 45 seconds.
+Topology polls and cleanup RPCs use socket timeouts of at most five seconds.
+Cleanup starts no further step after 45 seconds and guards individual target RPCs
+against the applicable local or overall deadline; these are not hard wall-clock
+completion guarantees for a trickling SOAP response.
 Households whose `GetZoneGroupState` answers 501 fail with `SONOS_TOPOLOGY_FAILED`.
 
 An attempt-scoped AVTransport subscription starts before Play. A bounded,

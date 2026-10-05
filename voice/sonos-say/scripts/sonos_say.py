@@ -60,8 +60,9 @@ from elevenlabs_voice import (  # noqa: E402
 )
 from sonos_topology import (  # noqa: E402
     TopologyError,
+    TOPOLOGY_MIN_READ_SECONDS,
     TOPOLOGY_VERIFY_TIMEOUT,
-    bounded_soco_request,
+    soco_deadline,
     detach_target,
     restore_target_group,
     validate_announcement_target,
@@ -731,15 +732,16 @@ def _run_cleanup_step(
     return False
 
 
-def _bounded_cleanup_step(action, interrupts, warning: str, deadline: float) -> bool:
-    """Start one cleanup step only while the restoration budget remains."""
-    if time.monotonic() >= deadline:
+def _bounded_cleanup_step(
+    speaker, action, interrupts, warning: str, deadline: float,
+) -> bool:
+    """Bound compound steps at each owned service RPC, not just their entry."""
+    if deadline - time.monotonic() < TOPOLOGY_MIN_READ_SECONDS:
         log.warning(warning)
         return False
-    remaining = max(0.0, deadline - time.monotonic())
 
     def bounded():
-        with bounded_soco_request(remaining):
+        with soco_deadline(speaker, deadline):
             action()
 
     return _run_cleanup_step(bounded, interrupts, warning)
@@ -795,7 +797,7 @@ def _restore_after_announcement(
                       if topology_mutated else deadline)
 
     def run(action, warning: str, until: float = local_deadline) -> bool:
-        return _bounded_cleanup_step(action, interrupts, warning, until)
+        return _bounded_cleanup_step(speaker, action, interrupts, warning, until)
 
     def authorize_local() -> None:
         # Callers have already recorded the topology failure.
