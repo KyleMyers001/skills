@@ -21,6 +21,7 @@ requirements before using it elsewhere.
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
 | [lavish](lavish/SKILL.md) | Create reviewable HTML artifacts for visual or complex responses. |
+| [meme-generator](meme-generator/SKILL.md) | Find and render recognizable meme templates with the bundled Python tool. |
 | [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
 | [fable-review](orchestration/fable-review/SKILL.md) | Request a Fable review through Claude Code and Herdr. |
 | [herdr](orchestration/herdr/SKILL.md) | Coordinate coding agents in a Herdr session. |
