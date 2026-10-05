@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 TOPOLOGY_POLL_SECONDS = 0.5
 TOPOLOGY_VERIFY_TIMEOUT = 5.0
-# requests rejects a zero timeout; a read started at its deadline still gets one.
+# Minimum useful budget for cleanup mutation dispatch (not read-only polling).
 TOPOLOGY_MIN_READ_SECONDS = 0.5
 DEVICE_DESCRIPTION_LIMIT = 64 * 1024
 
@@ -103,6 +103,12 @@ class _Deadline:
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
 
+    def request_timeout(self) -> float:
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise TopologyUnavailable("topology read budget exhausted")
+        return min(TOPOLOGY_VERIFY_TIMEOUT, remaining)
+
     def pause(self) -> bool:
         remaining = self.remaining()
         if remaining <= 0:
@@ -143,15 +149,13 @@ def _poll(
     incomplete. Errors raised by ``accept`` always propagate.
     """
     retryable = TopologyError if retry_structural else TopologyUnavailable
-    deadline = _Deadline(timeout)
+    deadline = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT)
     while True:
         last_error: Optional[BaseException] = None
-        if timeout <= 0:
-            call_timeout = TOPOLOGY_VERIFY_TIMEOUT
-        else:
-            call_timeout = _request_limit(deadline.remaining())
         try:
+            call_timeout = deadline.request_timeout()
             observed = read(call_timeout)
+            deadline.request_timeout()  # Late success is not evidence.
         except retryable as exc:
             last_error = exc
         else:
@@ -159,7 +163,7 @@ def _poll(
                 return observed
             if not wait_if_rejected:
                 raise TopologyError(rejected)
-        if not deadline.pause():
+        if timeout <= 0 or not deadline.pause():
             if (isinstance(last_error, TopologyUnavailable)
                     and not wait_if_rejected):
                 raise last_error
@@ -215,7 +219,7 @@ def _satellite_parent_uid(member: Any) -> Optional[str]:
     return None if parent is None else _uid(parent)
 
 
-def _fetch_zone_group_state(speaker: Any, timeout: float) -> Any:
+def _fetch_zone_group_state(speaker: Any, deadline: _Deadline) -> Any:
     """Process one fresh GetZoneGroupState payload under an explicit timeout.
 
     Explicit empty argument lists matter: SoCo 0.31.2 composes implicit
@@ -225,15 +229,16 @@ def _fetch_zone_group_state(speaker: Any, timeout: float) -> Any:
     if speaker._household_id is None:
         # SoCo keys the shared state by household; its getter is unbounded.
         speaker._household_id = speaker.deviceProperties.GetHouseholdID(
-            [], timeout=timeout,
+            [], timeout=deadline.request_timeout(),
         )["CurrentHouseholdID"]
     state = speaker.zone_group_state
     # SoCo 0.31.2 lets subscription events replace polled state at any time.
     if state.has_subscriptions is not False:
         raise TopologyError("fresh polling is unavailable under subscriptions")
     payload = speaker.zoneGroupTopology.GetZoneGroupState(
-        [], timeout=timeout,
+        [], timeout=deadline.request_timeout(),
     )["ZoneGroupState"]
+    deadline.request_timeout()  # Never publish a response received too late.
     state.process_payload(
         payload=payload, source="poll", source_ip=speaker.ip_address,
     )
@@ -246,8 +251,9 @@ def inspect_topology(
     speaker: Any, *, timeout: float = TOPOLOGY_VERIFY_TIMEOUT,
 ) -> TopologyPlan:
     """Observe physical grouping without imposing announcement eligibility."""
+    deadline = _Deadline(min(timeout, TOPOLOGY_VERIFY_TIMEOUT))
     try:
-        state = _fetch_zone_group_state(speaker, _request_limit(timeout))
+        state = _fetch_zone_group_state(speaker, deadline)
         group = speaker.group
         if group is None:
             raise TopologyError("group topology is missing")
@@ -289,6 +295,7 @@ def inspect_topology(
         if (state.has_subscriptions is not False
                 or state.processed_count != sample):
             raise TopologyError("topology changed during observation")
+        deadline.request_timeout()
     except TopologyError:
         raise
     except Exception as exc:
@@ -360,9 +367,12 @@ def validate_announcement_target(
 def _fetch_device_description(connection: http.client.HTTPConnection) -> bytes:
     connection.request("GET", "/xml/device_description.xml")
     response = connection.getresponse()
-    if response.status != 200:
-        raise ValueError("device description request failed")
-    return response.read(DEVICE_DESCRIPTION_LIMIT + 1)
+    try:
+        if response.status != 200:
+            raise ValueError("device description request failed")
+        return response.read(DEVICE_DESCRIPTION_LIMIT + 1)
+    finally:
+        response.close()
 
 
 def _validate_description_xml(body: bytes) -> None:
@@ -377,36 +387,50 @@ def _validate_description_xml(body: bytes) -> None:
     parser.Parse(body, True)
 
 
-def _read_device_uid(speaker: Any) -> str:
+def _read_device_uid(speaker: Any, *, deadline: Optional[float] = None) -> str:
     """Read UDN directly: even get_speaker_info(refresh=True) uses cached uid.
 
     Socket timeouts restart on every received byte, so a trickling responder
     could outlast them. A worker thread gives the whole exchange one deadline.
     """
-    connection = None
+    connection = worker = transport = None
+    transport_lock = threading.Lock()
+    cancelled = False
     try:
+        started = time.monotonic()
+        deadline = (min(deadline, started + TOPOLOGY_VERIFY_TIMEOUT)
+                    if deadline is not None else started + TOPOLOGY_VERIFY_TIMEOUT)
+        remaining = deadline - started
+        if remaining <= 0:
+            raise TimeoutError("device description request timed out")
         host = str(ipaddress.IPv4Address(speaker.ip_address))
         connection = http.client.HTTPConnection(
-            host, 1400, timeout=TOPOLOGY_VERIFY_TIMEOUT,
+            host, 1400, timeout=remaining,
         )
         outcome: dict[str, Any] = {}
 
         def fetch() -> None:
+            nonlocal transport
             try:
+                # Retain the actual socket before getresponse can transfer it
+                # to a Connection: close response and clear connection.sock.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("device description request timed out")
+                connection.timeout = remaining
+                connection.connect()
+                with transport_lock:
+                    transport = connection.sock
+                    if cancelled:
+                        raise TimeoutError("device description request cancelled")
                 outcome["body"] = _fetch_device_description(connection)
             except Exception as exc:
                 outcome["error"] = exc
 
         worker = threading.Thread(target=fetch, daemon=True)
         worker.start()
-        worker.join(TOPOLOGY_VERIFY_TIMEOUT)
-        if worker.is_alive():
-            sock = connection.sock
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)  # wake the blocked read
-                except OSError:
-                    pass
+        worker.join(max(0, deadline - time.monotonic()))
+        if worker.is_alive() or time.monotonic() >= deadline:
             raise TimeoutError("device description request timed out")
         if "error" in outcome:
             raise outcome["error"]
@@ -427,13 +451,25 @@ def _read_device_uid(speaker: Any) -> str:
     except Exception as exc:
         raise TopologyError("live target identity is unavailable") from exc
     finally:
+        # Shutdown, not response.close(), wakes a blocked buffered read. The
+        # worker owns response closure; never close its buffered reader from
+        # another thread (that can block on the reader's lock).
+        with transport_lock:
+            cancelled = True
+            if transport is not None and worker is not None and worker.is_alive():
+                try:
+                    transport.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        if worker is not None and worker.ident is not None:
+            worker.join()  # Cancelled reads must finish before leaving cleanup.
         if connection is not None:
             connection.close()
 
 
-def verify_target_identity(plan: TopologyPlan) -> None:
+def verify_target_identity(plan: TopologyPlan, *, deadline: Optional[float] = None) -> None:
     """Rendering cleanup must never trust a cached UID at a reassigned IP."""
-    if _read_device_uid(plan.speaker) != plan.speaker_uid:
+    if _read_device_uid(plan.speaker, deadline=deadline) != plan.speaker_uid:
         raise TopologyError("target identity changed")
 
 
@@ -528,9 +564,10 @@ def restore_target_group(
     expected_without_target = plan.member_uids - {plan.speaker_uid}
 
     def read(call_timeout: float):
+        deadline = _Deadline(call_timeout)
         return (
-            inspect_topology(plan.speaker, timeout=call_timeout),
-            inspect_topology(plan.coordinator, timeout=call_timeout),
+            inspect_topology(plan.speaker, timeout=deadline.request_timeout()),
+            inspect_topology(plan.coordinator, timeout=deadline.request_timeout()),
         )
 
     def classify(observed) -> Optional[str]:

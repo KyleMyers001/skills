@@ -26,7 +26,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.stack.enter_context(patch.dict(os.environ, TEST_CONFIG, clear=True))
         self.speaker = FakeSpeaker()
         self.stack.enter_context(patch.object(
-            topology, '_read_device_uid', side_effect=lambda sp: sp.device_uid,
+            topology, '_read_device_uid', side_effect=lambda sp, **kw: sp.device_uid,
         ))
         self.snapshots = []
         self.key = self.stack.enter_context(patch.object(say, 'get_api_key', return_value='dummy-key'))
@@ -644,7 +644,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
 
                 self.wait.side_effect = finish
 
-                def read(speaker):
+                def read(speaker, **kwargs):
                     if failure == 'timeout':
                         raise TimeoutError('description')
                     return 'replacement'

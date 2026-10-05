@@ -803,7 +803,7 @@ def _restore_after_announcement(
         # Callers have already recorded the topology failure.
         nonlocal local_safe
         local_safe = run(
-            lambda: verify_target_identity(topology),
+            lambda: verify_target_identity(topology, deadline=local_deadline),
             "Could not verify target identity for local restoration",
         )
 

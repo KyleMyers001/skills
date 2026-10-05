@@ -91,7 +91,7 @@ _TEST_ENV = patch.dict(os.environ, {
 
 
 _IDENTITY_FIXTURE = patch(
-    'sonos_topology._read_device_uid', side_effect=lambda sp: sp._uid,
+    'sonos_topology._read_device_uid', side_effect=lambda sp, **kw: sp._uid,
 )
 
 

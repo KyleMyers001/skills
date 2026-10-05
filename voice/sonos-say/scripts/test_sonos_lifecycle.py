@@ -134,7 +134,7 @@ class Temporary(tempfile.TemporaryDirectory):
         return super().__exit__(*args)
 
 outcome = 0
-with patch("sonos_topology._read_device_uid", side_effect=lambda sp: sp._uid), \
+with patch("sonos_topology._read_device_uid", side_effect=lambda sp, **kw: sp._uid), \
      patch("sonos_say.discover_speaker", discover), \
      patch("sonos_say.validate_announcement_target", validation), \
      patch("sonos_say.get_api_key", return_value="dummy-key"), \

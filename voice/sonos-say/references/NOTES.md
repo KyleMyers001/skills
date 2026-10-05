@@ -154,10 +154,11 @@ post-unjoin, pre-join, and post-join convergence waits retry it within their
 deadline because a group change can briefly publish incomplete samples. Identity
 changes and unrelated topology seen by recovery still fail immediately. Timeout,
 OS, SoCo, and transient runtime read failures stay temporary. Each read passes the
-remaining check time as its request timeout, between half a second and five
-seconds: a retry that starts at the deadline still gets a usable timeout rather
-than zero, which requests rejects. Topology reads leave SoCo's global
-configuration untouched; only cleanup RPCs and the join RPC set its request
+remaining check time as its request timeout, capped at five seconds. Sequential
+target/coordinator reads share the pre-join budget; household lookup and topology
+fetch share one observation deadline. An exhausted budget starts no further read,
+and a result arriving at or after its deadline is rejected. Topology reads leave
+SoCo's global configuration untouched; only cleanup RPCs and the join RPC set its request
 timeout and disable `ZGT_EVENT_FALLBACK`, restoring both afterward.
 Observed unrelated topology fails immediately without joining. Sonos provides
 no atomic lock against other controllers changing topology during playback;
@@ -210,9 +211,13 @@ encoding-aware Expat preflight rejects DOCTYPE/entity declarations and external
 entity references before expansion; only declaration-free, well-formed bytes
 reach ElementTree UDN extraction. Both parsers receive the same bytes. UTF-8 and
 UTF-16 (either byte order) remain supported; no new dependency is used. Socket
-timeouts restart on every received byte, so the request runs in a worker thread
-with one five-second deadline for the whole exchange; a trickling responder is
-cut off.
+timeouts restart on every received byte, so the request runs in a read-only worker
+with one deadline for the whole exchange: the earlier of five seconds or the
+absolute local-cleanup deadline. Late identity results cannot authorize writes,
+and fallback cannot spend a detached target's regroup reserve. Cancellation shuts
+down the retained socket even after a `Connection: close` response takes ownership
+from `HTTPConnection`. The worker closes its response, and cleanup joins that
+worker before returning; it does not leave a trickling reader/socket behind.
 A failed or mismatched description skips local writes. A successful snapshot
 already restores mute; cleanup does not redundantly set it again. Volume is
 written explicitly because it was captured separately and is read back.

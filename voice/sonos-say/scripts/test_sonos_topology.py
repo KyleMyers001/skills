@@ -981,7 +981,7 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.assertEqual(self.now, 0.7)
         grouped.speaker.join.assert_not_called()
 
-    def test_final_retry_still_gets_a_usable_read_timeout(self):
+    def test_final_retry_starts_before_deadline_with_remaining_timeout(self):
         seen = []
 
         def unavailable(speaker, timeout):
@@ -994,7 +994,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                     self.target, 'target', frozenset({'target'}), 5,
                 )
         self.assertEqual(self.now, 5)
-        self.assertEqual(len(seen), 11)
+        self.assertEqual(len(seen), 10)
         self.assertEqual(min(seen), topology.TOPOLOGY_MIN_READ_SECONDS)
         self.assertEqual(max(seen), topology.TOPOLOGY_VERIFY_TIMEOUT)
 
@@ -1060,14 +1060,14 @@ class TestTopologyReadRetries(unittest.TestCase):
         target.zone_group_state.on_poll = lambda: self.assertEqual(
             (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK), previous)
         topology.inspect_topology(target, timeout=30)
-        topology.inspect_topology(target, timeout=0)
+        with self.assertRaises(topology.TopologyUnavailable):
+            topology.inspect_topology(target, timeout=0)
         target.deviceProperties.GetHouseholdID.assert_called_once_with(
             [], timeout=5.0)
         self.assertEqual(target._household_id, 'household')
         self.assertEqual(
             target.zoneGroupTopology.GetZoneGroupState.call_args_list,
-            [unittest.mock.call([], timeout=5.0),
-             unittest.mock.call([], timeout=topology.TOPOLOGY_MIN_READ_SECONDS)],
+            [unittest.mock.call([], timeout=5.0)],
         )
 
 
@@ -1100,7 +1100,7 @@ class TestIdempotentTopology(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 5)
         self.assertEqual(self.h.now, 5)
-        self.assertEqual(self.h.samples, 12)  # plan plus initial sample and ten cycles
+        self.assertEqual(self.h.samples, 11)  # plan plus ten samples before expiry
         self.assertEqual(topology.TOPOLOGY_POLL_SECONDS, 0.5)
         self.h.now = 0
         with self.assertRaises(topology.TopologyError):
