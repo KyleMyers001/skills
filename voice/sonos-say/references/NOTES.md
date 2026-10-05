@@ -154,11 +154,17 @@ phase. Before/after-snapshot and final isolation checks carry the absolute local
 deadline into their poller: both retry requests and sleeps stop at that boundary,
 not merely at service dispatch. An exhausted outer deadline performs no read;
 zero-timeout single-observation behavior remains unchanged when time is available.
-A missing group or role is structural. Isolation checks fail on it immediately;
-post-unjoin, pre-join, and post-join convergence waits retry it within their
-deadline because a group change can briefly publish incomplete samples. Identity
-changes and unrelated topology seen by recovery still fail immediately. Timeout,
-OS, SoCo, and transient runtime read failures stay temporary. Each read passes the
+A missing group view is `TopologyIncomplete`. Isolation checks fail on it
+immediately; post-unjoin, pre-join, and post-join convergence waits may retry it
+because a group change can briefly omit the target from the published groups.
+Malformed roles/XML, unsupported polling (including UPnP/HTTP 501), active
+subscriptions, SDK protocol errors (including UPnP 401/402), and arbitrary runtime
+errors fail immediately, even in convergence waits. Only explicit connection/reset/
+timeout exception types are temporary; neither `OSError` nor `SoCoException` is
+blanket-retryable. Identity changes and unrelated topology also fail immediately.
+Each new read needs at least half a second remaining: skip the read below that
+threshold, never round its timeout beyond the deadline. An on-time response can
+still succeed with less than half a second left. Each dispatched read passes the
 remaining check time as its request timeout, capped at five seconds. Sequential
 target/coordinator reads share the pre-join budget; household lookup and topology
 fetch share one observation deadline. An exhausted budget starts no further read,
@@ -171,7 +177,12 @@ fresh checks cannot eliminate the race between verification and a write.
 
 Cleanup freshly verifies exact isolated membership and satellite ownership for
 **every target**, including standalone and detached ordinary speakers, before
-`Snapshot.restore(fade=False)` and again after restoration. The post-restore
+restoration. Detached members restore only local rendering via Snapshot's member
+path (temporarily suppressing its captured coordinator flag, restoring the flag
+on every exit). This preserves mute, volume, EQ and fixed-volume handling without
+transport reads, source replacement, pause/play/stop, or queue seeking before
+rejoin. Exact group recovery provides its own fresh checks. Standalone/bonded
+targets use full `Snapshot.restore(fade=False)` and verify topology again afterward. The post-restore
 sample guards empty-URI clearing. Standalone and bonded targets then get one more
 isolation check after the last cleanup write. Do not run that check after a
 rejoin, and do not repair the room; a later regroup is `SONOS_RESTORE_FAILED`.
@@ -194,7 +205,17 @@ use explicit empty arguments to avoid an uncapped service-description fetch.
 Prior instance dispatch attributes and SoCo configuration are restored on every
 exit, including partial setup and interruption; no SDK class is patched.
 
-Snapshot remains responsible for source, queue, EQ, and transport semantics.
+Snapshot remains responsible for source, queue, EQ, and transport semantics,
+except its SoCo 0.31.2 local-queue restart is scoped to a metadata-free equivalent
+of `play_from_queue`: retain the coordinator gate, set `x-rincon-queue:<uid>#0`,
+seek the same one-based track, and honor `start`. The UID comes from the fresh
+processed topology that authorized cleanup. The SDK's original path calls
+`get_speaker_info()` when its metadata cache is empty, which performs an unrelated
+raw `requests.get(..., timeout=None)` and XML parse outside the SOAP guard. No
+device-description read or partial metadata-cache prefill is needed for a local
+queue URI. The scoped instance method is restored on every exit; SOAP dispatch
+still guards every queue/seek/play action. Installed-SoCo subprocess tests exercise
+real Snapshot, role getters and processed topology with an empty metadata cache.
 Exhaustion stops further local RPCs and reports `SONOS_RESTORE_FAILED`; regrouping
 gets its own guard and still requires fresh safety evidence. It cannot turn a
 partial restoration into success. Compound URI clearing and read-back steps use
@@ -207,7 +228,8 @@ Device-description is not fetched before a topology-backed restore or rejoin.
 A fresh topology poll that still reports the captured UUID authorizes transport,
 volume, mute, and rejoin; do not cross-check the description. Fetch the UDN from
 the target IP's `/xml/device_description.xml` on port 1400 only to authorize local
-mute and volume when topology is unavailable or unsafe. SoCo's `uid` and even
+rendering when topology is unavailable or unsafe (including detached EQ recovery).
+SoCo's `uid` and even
 `get_speaker_info(refresh=True)` reuse the cached UID and cannot authorize those
 writes. A cached device-UID change alone is not a transport refusal. A different
 topology UUID is still refused. Identity reads have a five-second socket timeout,
@@ -234,8 +256,9 @@ fail.
 
 Safe cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring
 volume. An empty saved URI is cleared on idle standalone/bonded targets, not detached
-members awaiting regrouping. Internal callers without a captured room plan clear
-only a confirmed coordinator; an unreadable coordinator state is a failure.
+members awaiting regrouping. Missing-plan preflight cleanup is read-only; an
+internal caller claiming mutation without a captured plan fails closed with no
+writes. There is no role-only cleanup authorization path.
 Mute, volume, source/transport where meaningful, and cleared-URI read-back errors
 or mismatches are failures. Queue source checks
 use `GetMediaInfo.CurrentURI`, not a per-track URI. Cleanup continues
@@ -251,6 +274,34 @@ One cleanup-aware guard spans the full resource lifetime. Cleanup actions and
 snapshot restoration run once, without interrupt-driven replay.
 A failed pre-unjoin validation incurs no recovery obligation or group RPC;
 a validated unjoin attempt does, even if it mutates the device then times out.
+
+### Cleanup follow-up design boundaries
+
+- **General implicit service metadata (#5), deferred:** only the known
+  `GetZoneGroupState`/`GetHouseholdID` zero-argument calls receive explicit `[]`.
+  Arbitrary future `send_command(action, args=None)` calls can still make SoCo
+  fetch service descriptions under its fixed 10-second timeout. A generic args
+  substitution would be unsafe for actions with required arguments. Audit new
+  SDK call paths; a general metadata policy requires separate design/tests.
+- **Hard SOAP deadlines (#11), deferred:** per-RPC timeouts and boundary checks
+  are soft limits, not cancellation of a trickling in-flight SOAP response.
+  Never move mutating RPCs to an abandoned worker to claim a hard deadline.
+  Hard cancellation needs a design that establishes whether a mutation applied
+  and prevents late writes. The existing read-only identity cancellation,
+  retained-socket shutdown and worker join remain intact; these security
+  protections must not be removed as a simplification.
+- **Final isolation check (#7), retained:** it is not redundant in the current
+  ordering. Explicit volume recovery occurs after the post-Snapshot sample;
+  another controller can regroup during that interval, and URI clearing can
+  also mutate transport. Removing the final sample failed the existing
+  `test_later_regroup_after_post_restore_check_fails_without_join` contract.
+  Keep verification after these writes and never run it after exact rejoin.
+
+All follow-up verification is offline (real SoCo 0.31.2 subprocess contracts,
+mocked SOAP and loopback identity servers). It does not authorize LAN playback or
+establish hardware acceptance. `soco-zgs-cache-gotcha.md` was not present anywhere
+inside this checkout (including hidden directories); no profile or external
+memory copy was read or modified.
 
 ## Completion and error contract
 

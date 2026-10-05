@@ -139,19 +139,23 @@ class FakeSnapshot:
     def __init__(self, speaker):
         self.device = speaker
         self.restores = 0
+        self.transport_restores = 0
         self.is_playing_queue = False
         self.is_playing_cloud_queue = False
 
     def snapshot(self):
+        self.is_coordinator = self.device.is_coordinator
         self.media_uri = self.device.uri
         self.volume, self.mute = self.device.volume, self.device.mute
         self.transport_state = self.device.state
 
     def restore(self, fade=False):
         self.restores += 1
-        self.device.uri = self.media_uri
         self.device.volume, self.device.mute = self.volume, self.mute
-        self.device.state = self.transport_state
+        if self.is_coordinator:
+            self.transport_restores += 1
+            self.device.uri = self.media_uri
+            self.device.state = self.transport_state
 
 
 @contextlib.contextmanager

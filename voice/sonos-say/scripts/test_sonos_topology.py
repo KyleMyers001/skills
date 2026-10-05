@@ -884,7 +884,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                           side_effect=topology.TopologyUnavailable()):
             with self.assertRaises(topology.TopologyError):
                 topology.verify_isolated_target(plan, timeout=0.7)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.5)  # Subminimum remainder cannot fund a read.
         self.target.group.members.append(self.coord)
         self.sleep.reset_mock()
         with self.assertRaises(topology.TopologyError):
@@ -926,7 +926,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                           side_effect=topology.TopologyUnavailable()):
             with self.assertRaises(topology.TopologyError):
                 topology.restore_target_group(plan, timeout=0.7)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.5)  # Subminimum remainder cannot fund a read.
         self.target.join.assert_not_called()
 
     def test_post_join_keeps_its_own_five_seconds(self):
@@ -955,11 +955,8 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.sleep.assert_not_called()
 
     def test_convergence_waits_retry_mid_transition_samples(self):
-        missing = SimpleNamespace(_uid='target', _has_satellites=False)
         settled = self.target.group
-        self.target.group = SimpleNamespace(
-            coordinator=self.target, members=[missing],
-        )
+        self.target.group = None  # Valid parser objects, incomplete group view.
 
         def settle(seconds):
             self.advance(seconds)
@@ -978,7 +975,7 @@ class TestTopologyReadRetries(unittest.TestCase):
         with self.assertRaises(topology.TopologyError) as raised:
             topology.restore_target_group(grouped, timeout=0.7)
         self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.5)  # Subminimum remainder cannot fund a read.
         grouped.speaker.join.assert_not_called()
 
     def test_final_retry_starts_before_deadline_with_remaining_timeout(self):
@@ -1011,9 +1008,8 @@ class TestTopologyReadRetries(unittest.TestCase):
         plan = topology.validate_announcement_target(self.target)
         errors = (
             TimeoutError('stall'),
-            OSError('reset'),
-            RuntimeError('unavailable'),
-            soco.exceptions.SoCoException('upnp'),
+            ConnectionResetError('reset'),
+            ConnectionRefusedError('offline'),
         )
         for error in errors:
             with self.subTest(error=type(error).__name__):
@@ -1026,7 +1022,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                 self.target.zone_group_state.on_poll = fail
                 with self.assertRaises(topology.TopologyUnavailable):
                     topology.verify_isolated_target(plan, timeout=0.7)
-                self.assertEqual(self.now, 0.7)
+                self.assertEqual(self.now, 0.5)  # Subminimum remainder cannot fund a read.
 
     def test_unsupported_zone_group_state_fails_without_retry(self):
         class HTTPError(OSError):  # requests.HTTPError's shape
@@ -1105,7 +1101,8 @@ class TestIdempotentTopology(unittest.TestCase):
         self.h.now = 0
         with self.assertRaises(topology.TopologyError):
             topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 0.2)
-        self.assertEqual(self.h.now, 0.2)
+        self.assertEqual(self.h.now, 0)
+        self.assertEqual(self.h.samples, 11)  # No subminimum observation.
 
     def test_unrelated_target_group_is_not_rejoined(self):
         other = _CachedSpeaker('other', self.h)

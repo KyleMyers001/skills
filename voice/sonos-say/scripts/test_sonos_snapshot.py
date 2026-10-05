@@ -63,7 +63,7 @@ def network(url, *, headers, data, timeout):
         now += min(duration, timeout)
         if duration > timeout:
             raise TimeoutError('bounded SOAP timeout')
-        if mode == 'interrupt' and phase == 'local' and action == 'GetTransportInfo':
+        if mode == 'interrupt' and phase == 'local' and action == 'SetMute':
             raise KeyboardInterrupt()
     result = {}
     if action == 'GetZoneGroupState':
@@ -137,7 +137,8 @@ with patch.object(topology.time, 'monotonic', side_effect=lambda: now), \
         assert layout == 'original'
     if mode == 'healthy':
         assert rendering['Mute'] == '1' and rendering['Volume'] == '30'
-        assert uri == snapshot.media_uri and transport == snapshot.transport_state
+        assert not any(call[2] in ('GetTransportInfo', 'Play', 'Stop', 'Pause', 'SetAVTransportURI')
+                       for call in calls if call[0] == 'local'), calls
     assert any(call[2] == 'GetZoneGroupState' for call in calls if call[0] == 'group')
     assert all('send_command' not in vars(service) for service in services)
     assert cached_mute is target.renderingControl.SetMute
@@ -241,11 +242,23 @@ class Device:
     def stop(self): self.state = 'STOPPED'
     def play(self): self.state = 'PLAYING'
 for uri in ('x-rincon-queue:target#0', 'http://example.invalid/radio', 'x-file-cifs://example.invalid/file'):
-    device = Device(uri)
+    from unittest.mock import patch
+    from sonos_test_support import FakeSpeaker
+    device = FakeSpeaker('target')
+    device.uri, device.state = uri, 'PLAYING'
+    device.bass, device.treble, device.loudness = 0, 0, True
+    device.play_mode, device.cross_fade = 'NORMAL', False
+    device.get_current_track_info = lambda: {'playlist_position': '2', 'position': ''}
+    device.seek = lambda position: None
+    device.pause = lambda: setattr(device, 'state', 'PAUSED_PLAYBACK')
+    device.play = lambda: setattr(device, 'state', 'PLAYING')
+    device.avTransport.Seek = lambda args: setattr(device, 'position', dict(args)['Target'])
+    plan = say.validate_announcement_target(device)
     snapshot = Snapshot(device); snapshot.snapshot()
     device.play_uri('http://example.invalid/announcement')
     device.mute = False; device.volume = 35
-    failed, interrupt = say._restore_after_announcement(device, snapshot, True, 30, None, False)
+    with patch('sonos_topology._read_device_uid', return_value='target'):
+        failed, interrupt = say._restore_after_announcement(device, snapshot, True, 30, plan, False)
     assert not failed and interrupt is None
     assert device.uri == uri and device.state == 'PLAYING' and device.mute and device.volume == 30
     if '#0' in uri: assert device.position == 2

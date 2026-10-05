@@ -113,11 +113,14 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   a transport refusal. Standalone and bonded targets get one more isolation
   check after the last cleanup write. Do not run that check after a rejoin, and
   do not repair bonds or regroup an unrelated room.
-- Unavailable topology reads retry for at most five seconds per check.
-  A missing group or role fails isolation checks immediately; post-unjoin,
-  pre-join, and post-join convergence waits retry such mid-transition samples
-  within their deadline. Topology observations use request timeouts between
-  half a second and five seconds; no ZoneGroupTopology subscription is opened.
+- Unavailable network reads retry for at most five seconds per check.
+  A missing group fails isolation checks immediately; post-unjoin, pre-join,
+  and post-join convergence waits may retry that incomplete group view.
+  Malformed roles/XML, unsupported polling, subscriptions and SDK protocol errors
+  fail immediately in every phase. Topology reads require half a second remaining
+  and cap their timeout at the remaining budget, at most five seconds; skip reads
+  below the minimum instead of rounding past the deadline. No ZoneGroupTopology
+  subscription is opened.
   Recovery's pre-join wait, join RPC, and post-join wait each get their own five
   seconds. Cleanup starts no further step after 45 seconds. A scoped SDK dispatch
   guard checks time before each target RPC, including Snapshot's internal calls,
@@ -131,6 +134,11 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   is never retried into acceptance, and mutating RPCs are never replayed.
   Refusal before the first state-changing RPC incurs no restoration writes; an
   attempted unjoin still requires regroup-only recovery.
+- Detached members restore only local mute/volume/EQ, never their temporary
+  isolated transport before exact rejoin. Local-queue cleanup uses the validated
+  topology UID without SoCo's unrelated, unbounded speaker-metadata fetch.
+  General implicit service-metadata guards and hard in-flight SOAP deadlines
+  remain explicit design follow-ups in the technical notes.
 - Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
   deletion. Cleanup attempts captured transport, URI, volume, and group
   restoration; group recovery is armed only at a validated unjoin RPC attempt.

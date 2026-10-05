@@ -65,7 +65,7 @@ class TestCleanupTopologyReserve(unittest.TestCase):
         for check in (1, 2, 3):
             with self.subTest(check=check):
                 target, coordinator = FakeSpeaker(), FakeSpeaker('coord')
-                grouped = check != 3
+                grouped = check == 1  # Detached restore has no transport post-check.
                 if grouped:
                     target.group = coordinator.group = SimpleNamespace(
                         coordinator=coordinator, members=[coordinator, target])
@@ -197,10 +197,9 @@ class TestPhaseBudgets(unittest.TestCase):
                              side_effect=lambda dt: now.__setitem__(0, now[0] + dt)):
             with self.assertRaises(topology.TopologyUnavailable):
                 topology._poll(unavailable, 0.7)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertAlmostEqual(calls[0], 0.7)
-        self.assertAlmostEqual(calls[1], 0.2)
-        self.assertEqual(now[0], 0.7)
+        self.assertEqual(now[0], 0.5)  # No useful read fits the remaining budget.
 
     def test_late_prejoin_sample_cannot_authorize_join(self):
         target, coordinator = FakeSpeaker(), FakeSpeaker('coord')
@@ -236,7 +235,7 @@ class TestPhaseBudgets(unittest.TestCase):
                 with patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]):
                     with self.assertRaises(topology.TopologyUnavailable):
                         topology.inspect_topology(speaker, timeout=timeout)
-                self.assertEqual(calls, [] if timeout <= 0 else [timeout])
+                self.assertEqual(calls, [] if timeout < 0.5 else [timeout])
 
     def test_expired_household_read_cannot_dispatch_topology(self):
         speaker = FakeSpeaker()
