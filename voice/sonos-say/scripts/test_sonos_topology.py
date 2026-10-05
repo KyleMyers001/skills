@@ -352,6 +352,14 @@ class TestBondedRoomEligibility(unittest.TestCase):
                 saved_roles = plan.member_topology
                 if change == 'parent':
                     satellites[0]._satellite_parent = FakeSpeaker('foreign')
+                    frozen = {
+                        (member.uid, member.parent_uid)
+                        for member in plan.member_topology if member.satellite
+                    }
+                    self.assertEqual(
+                        frozen,
+                        {(sat.uid, primary.uid) for sat in satellites},
+                    )
                 elif change == 'remove':
                     primary.group.members.remove(satellites[0])
                 elif change == 'add':
@@ -635,6 +643,28 @@ class TestIdentityDescription(unittest.TestCase):
             topology.verify_target_identity(self.plan)
         self.assertEqual(self.connection.return_value.close.call_count, 5)
 
+    def test_doctype_or_entity_description_is_rejected_unparsed(self):
+        bodies = (
+            b'<!DOCTYPE foo [<!ENTITY x "target">]><root '
+            b'xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+            b'<UDN>uuid:&x;</UDN></device></root>',
+            b'<!DOCTYPE foo><root/>',
+            b'<!ENTITY x "target"><root/>',
+            b'<!doctype foo [<!entity x "target">]><root/>',
+        )
+        for body in bodies:
+            with self.subTest(body=body[:24]):
+                self.response.read.return_value = body
+                with patch('sonos_topology.ET.fromstring',
+                           wraps=topology.ET.fromstring) as parse:
+                    with self.assertRaises(topology.TopologyError):
+                        topology.verify_target_identity(self.plan)
+                    parse.assert_not_called()
+        self.assertEqual(self.target.uid, 'target')
+        self.assertEqual(
+            self.connection.return_value.close.call_count, len(bodies),
+        )
+
 
 class TestTopologyReadRetries(unittest.TestCase):
     def setUp(self):
@@ -699,7 +729,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                 plan = self.grouped_plan()
                 inspect = topology.inspect_topology
                 failed = []
-                def transient(speaker):
+                def transient(speaker, *args, **kwargs):
                     if speaker.uid == failing_uid and not failed:
                         failed.append(True)
                         raise topology.TopologyUnavailable()
@@ -718,21 +748,89 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.assertEqual(self.now, 0.7)
         self.target.join.assert_not_called()
 
-    def test_post_join_uses_remaining_deadline(self):
+    def test_post_join_keeps_its_own_five_seconds(self):
         plan = self.grouped_plan()
-        inspect = topology.inspect_topology
-        failed = []
-        def transient(speaker):
-            if not failed:
-                failed.append(True)
-                raise topology.TopologyUnavailable()
-            return inspect(speaker)
+        real_inspect = topology.inspect_topology
+
+        def transient(speaker, *args, **kwargs):
+            if self.now < 4.5:
+                raise topology.TopologyUnavailable('pre-join blip')
+            return real_inspect(speaker)
+
         self.target.join.side_effect = None  # Publication never converges.
         with patch.object(topology, 'inspect_topology', side_effect=transient):
             with self.assertRaises(topology.TopologyError):
-                topology.restore_target_group(plan, timeout=0.7)
-        self.assertEqual(self.now, 0.7)
+                topology.restore_target_group(plan, timeout=5)
         self.target.join.assert_called_once()
+        self.assertGreaterEqual(self.now, 9.5)
+        self.assertLess(self.now, 10.5)
+
+    def test_structural_topology_errors_fail_without_retry(self):
+        plan = topology.validate_announcement_target(self.target)
+        self.target.group = None
+        with self.assertRaises(topology.TopologyError) as raised:
+            topology.verify_isolated_target(plan, timeout=5)
+        self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
+        self.sleep.assert_not_called()
+
+        missing = SimpleNamespace(_uid='target', _has_satellites=False)
+        self.target.group = SimpleNamespace(
+            coordinator=self.target, members=[missing],
+        )
+        self.sleep.reset_mock()
+        with self.assertRaises(topology.TopologyError) as raised:
+            topology._wait_for_topology(
+                self.target, self.target.uid, frozenset({self.target.uid}), 5,
+            )
+        self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
+        self.sleep.assert_not_called()
+
+        grouped = self.grouped_plan()
+        grouped.speaker.group = None
+        self.sleep.reset_mock()
+        with self.assertRaises(topology.TopologyError) as raised:
+            topology.restore_target_group(grouped, timeout=5)
+        self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
+        self.sleep.assert_not_called()
+        grouped.speaker.join.assert_not_called()
+
+    def test_temporary_read_errors_retry_until_the_check_deadline(self):
+        import soco.exceptions
+        plan = topology.validate_announcement_target(self.target)
+        errors = (
+            TimeoutError('stall'),
+            OSError('reset'),
+            RuntimeError('unavailable'),
+            soco.exceptions.SoCoException('upnp'),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                self.now = 0.0
+                self.sleep.reset_mock()
+
+                def fail(exc=error):
+                    raise exc
+
+                self.target.zone_group_state.clear_cache = fail
+                with self.assertRaises(topology.TopologyUnavailable):
+                    topology.verify_isolated_target(plan, timeout=0.7)
+                self.assertEqual(self.now, 0.7)
+
+    def test_poll_caps_soco_timeout_and_disables_event_fallback(self):
+        import soco.config as config
+        seen = []
+        target = FakeSpeaker()
+        previous = (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK)
+
+        def clear():
+            seen.append((config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK))
+
+        target.zone_group_state.clear_cache = clear
+        topology.inspect_topology(target)
+        self.assertEqual(seen, [(5.0, False)])
+        self.assertEqual(
+            (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK), previous,
+        )
 
 
 class TestIdempotentTopology(unittest.TestCase):

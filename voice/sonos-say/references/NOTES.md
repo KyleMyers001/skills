@@ -139,8 +139,13 @@ accepts an already exact original coordinator/member set without a join RPC.
 Otherwise it joins only from the expected isolated-target/original-group-minus-
 target state. Convergence polls every 0.5 seconds for at most five seconds, always
 invalidating the cache and sleeping no longer than the remaining deadline.
-Unavailable target/coordinator observations retry within the recovery deadline;
-post-join convergence uses its remaining time rather than starting a new budget.
+Unavailable target/coordinator observations retry within that pre-join deadline.
+Post-join convergence starts its own five-second budget and does not reuse leftover
+pre-join time. A missing group or role is structural and is not retried by
+isolation, pre-join, or post-join waits. Timeout, OS, SoCo, and transient runtime
+read failures stay temporary. Each owned poll sets SoCo's request timeout to the
+remaining check time, never above five seconds, and disables `ZGT_EVENT_FALLBACK`
+so a failed poll cannot open a subscription. Both settings are restored afterward.
 Observed unrelated topology fails immediately without joining. Sonos provides
 no atomic lock against other controllers changing topology during playback;
 fresh checks cannot eliminate the race between verification and a write.
@@ -148,22 +153,31 @@ fresh checks cannot eliminate the race between verification and a write.
 Cleanup freshly verifies exact isolated membership and satellite ownership for
 **every target**, including standalone and detached ordinary speakers, before
 `Snapshot.restore(fade=False)` and again after restoration. The post-restore
-sample also guards empty-URI clearing; no third topology sample or public
-coordinator lookup is needed for a captured plan. Unavailable observations retry
-every 0.5 seconds for at most five seconds per check. Known unsafe topology is
-never retried into acceptance, and mutating RPCs are never replayed. If topology
-is unsafe or remains unavailable, cleanup skips transport writes, attempts safe
-independent target-local mute/volume recovery, and reports `SONOS_RESTORE_FAILED`.
-It does not repair bonds or join an unrelated group.
+sample guards empty-URI clearing. Standalone and bonded targets then get one more
+isolation check after the last cleanup write. Do not run that check after a
+rejoin, and do not repair the room; a later regroup is `SONOS_RESTORE_FAILED`.
+No public coordinator lookup is used for a captured plan. Unavailable observations
+retry every 0.5 seconds for at most five seconds per check. Known unsafe topology
+is never retried into acceptance, and mutating RPCs are never replayed. If topology
+is unsafe or remains unavailable, cleanup skips transport writes and does not join,
+attempts safe independent target-local mute/volume recovery, and reports
+`SONOS_RESTORE_FAILED`. It does not repair bonds or join an unrelated group.
+Cleanup starts no further step after 45 seconds. `Snapshot.restore` remains one
+step and is not split between its internal calls. Each cleanup RPC uses the same
+five-second SoCo request cap and does not enable topology-event fallback.
 
-Rendering safety requires the UDN from a fresh direct request to the target IP's
-`/xml/device_description.xml` on port 1400. SoCo's `uid` and even
-`get_speaker_info(refresh=True)` reuse the cached UID and cannot authorize writes
-at a reassigned IP. Identity reads have a five-second socket timeout, a 64 KiB
-body limit, strict UDN parsing, and no redirect/proxy following. Failed or changed
-identity prohibits writes. After failed/skipped snapshot restoration or an unsafe
-post-check, fallback obtains fresh identity proof again. A successful snapshot
-already restores mute; cleanup does not redundantly set it again.
+Device-description is not fetched before a topology-backed restore or rejoin.
+A fresh topology poll that still reports the captured UUID authorizes transport,
+volume, mute, and rejoin; do not cross-check the description. Fetch the UDN from
+the target IP's `/xml/device_description.xml` on port 1400 only to authorize local
+mute and volume when topology is unavailable or unsafe. SoCo's `uid` and even
+`get_speaker_info(refresh=True)` reuse the cached UID and cannot authorize those
+writes. A cached device-UID change alone is not a transport refusal. A different
+topology UUID is still refused. Identity reads have a five-second socket timeout,
+a 64 KiB body limit, strict UDN parsing, and no redirect/proxy following. Any
+DOCTYPE or ENTITY declaration is rejected before XML parsing. A failed or
+mismatched description skips local writes. A successful snapshot already restores
+mute; cleanup does not redundantly set it again.
 
 A pre-mutation refusal skips transport/rendering restoration for every layout;
 an attempted unjoin still receives regroup-only recovery. State recovery is armed
@@ -193,7 +207,9 @@ a validated unjoin attempt does, even if it mutates the device then times out.
 Only observed PLAYING followed by STOPPED counts as completion. TRANSITIONING
 alone does not prove playback started. Unknown/malformed telemetry, read errors,
 pausing, non-start, and timeout produce `SONOS_PLAYBACK_FAILED` after cleanup.
-Deadlines bound polling, not every blocking SoCo or network call.
+Playback deadlines bound polling, not every discovery or synthesis call.
+Topology polls and cleanup RPCs are separately capped at five seconds, and
+cleanup starts no further step after 45 seconds.
 
 An attempt-scoped AVTransport subscription starts before Play. A bounded,
 thread-safe queue sink retains ordered states during blocking RPCs, correlated

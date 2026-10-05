@@ -19,9 +19,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 soco = types.ModuleType("soco")
 soco.SoCo = MagicMock()
+config = types.ModuleType("soco.config")
+config.REQUEST_TIMEOUT = 20.0
+config.ZGT_EVENT_FALLBACK = True
+soco.config = config
+exceptions = types.ModuleType("soco.exceptions")
+exceptions.SoCoException = type("SoCoException", (Exception,), {})
+soco.exceptions = exceptions
 snap = types.ModuleType("soco.snapshot")
 snap.Snapshot = MagicMock()
 sys.modules["soco"] = soco
+sys.modules["soco.config"] = config
+sys.modules["soco.exceptions"] = exceptions
 sys.modules["soco.snapshot"] = snap
 import sonos_say as say
 phase, signame, root, failure = sys.argv[1:]

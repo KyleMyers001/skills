@@ -43,6 +43,19 @@ from unittest.mock import MagicMock, patch
 _soco_stub = types.ModuleType("soco")
 _soco_stub.SoCo = MagicMock()
 _soco_stub.discover = MagicMock(return_value=[])
+_config_stub = types.ModuleType("soco.config")
+_config_stub.REQUEST_TIMEOUT = 20.0
+_config_stub.ZGT_EVENT_FALLBACK = True
+_soco_stub.config = _config_stub
+_exceptions_stub = types.ModuleType("soco.exceptions")
+
+
+class _SoCoException(Exception):
+    pass
+
+
+_exceptions_stub.SoCoException = _SoCoException
+_soco_stub.exceptions = _exceptions_stub
 
 _snapshot_stub = types.ModuleType("soco.snapshot")
 
@@ -62,6 +75,8 @@ class _SnapshotStub:
 _snapshot_stub.Snapshot = _SnapshotStub
 
 sys.modules.setdefault("soco", _soco_stub)
+sys.modules.setdefault("soco.config", _config_stub)
+sys.modules.setdefault("soco.exceptions", _exceptions_stub)
 sys.modules.setdefault("soco.snapshot", _snapshot_stub)
 
 import sonos_say  # noqa: E402
@@ -1862,18 +1877,23 @@ class TestEmptyUriClearing(unittest.TestCase):
         )
         sp.avTransport.SetAVTransportURI.assert_not_called()
 
-    def test_unplanned_non_coordinator_cleanup_does_not_clear(self):
-        """Internal cleanup without a plan retains its coordinator guard."""
+    def test_unplanned_nonempty_snapshot_ignores_coordinator_flag(self):
+        """Installed Snapshot callers pass topology=None and a nonempty URI."""
         sp = _set_standalone(MagicMock())
-        sp.is_coordinator = False
-        snapshot = SimpleNamespace(media_uri='', mute=False,
-                                   restore=MagicMock())
+        type(sp).is_coordinator = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        snapshot = MagicMock(
+            media_uri="prior-uri", mute=False, transport_state="STOPPED",
+        )
         failed, interrupt = sonos_say._restore_after_announcement(
-            sp, snapshot, True, None, None, False,
+            sp, snapshot, True, 30, None, False,
         )
         self.assertFalse(failed)
         self.assertIsNone(interrupt)
+        snapshot.restore.assert_called_once_with(fade=False)
         sp.avTransport.SetAVTransportURI.assert_not_called()
+        self.assertEqual(sp.volume, 30)
 
     def test_stop_called_before_clear_if_playing(self):
         """If transport is PLAYING when URI clearing starts, speaker.stop() is called."""
@@ -2107,20 +2127,47 @@ class TestRestoreVerification(unittest.TestCase):
                 self.assertTrue(failed)
                 sp.avTransport.SetAVTransportURI.assert_called_once()
 
-    def test_coordinator_inspection_error_is_failure(self):
+    def test_cleanup_starts_no_further_step_after_45_seconds(self):
         sp = _set_standalone(MagicMock())
-        type(sp).is_coordinator = property(
-            lambda self: (_ for _ in ()).throw(RuntimeError("offline")),
+        writes = []
+        type(sp).volume = property(
+            lambda self: 30, lambda self, value: writes.append(value),
         )
-        failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
-        self.assertTrue(failed)
-        self.assertEqual(sp.volume, 30)
+        snapshot = MagicMock(media_uri="prior-uri", mute=False)
+        clock = [0.0]
 
-    def test_unknown_coordinator_flag_is_failure(self):
-        sp = _set_standalone(MagicMock())
-        sp.is_coordinator = None
-        failed, _ = self._restore(sp, MagicMock(media_uri=""), detached=False)
+        def restore(fade=False):
+            clock[0] = 45.0
+
+        snapshot.restore.side_effect = restore
+        self.assertEqual(getattr(sonos_say, "CLEANUP_BUDGET_SECONDS", None), 45.0)
+        with patch.object(sonos_say.time, "monotonic", side_effect=lambda: clock[0]):
+            failed, interrupt = sonos_say._restore_after_announcement(
+                sp, snapshot, True, 30,
+                sonos_say.validate_announcement_target(sp), False,
+            )
         self.assertTrue(failed)
+        self.assertIsNone(interrupt)
+        self.assertEqual(writes, [])
+        snapshot.restore.assert_called_once_with(fade=False)
+
+    def test_cleanup_rpc_caps_soco_timeout(self):
+        import soco.config as config
+        sp = _set_standalone(MagicMock())
+        seen = []
+        snapshot = MagicMock(media_uri="prior-uri", mute=False)
+
+        def restore(fade=False):
+            seen.append((config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK))
+
+        snapshot.restore.side_effect = restore
+        sonos_say._restore_after_announcement(
+            sp, snapshot, True, 30,
+            sonos_say.validate_announcement_target(sp), False,
+        )
+        self.assertIn((5.0, False), seen)
+        self.assertEqual(config.REQUEST_TIMEOUT, 20.0)
+        self.assertIs(config.ZGT_EVENT_FALLBACK, True)
 
     def test_uri_cleanup_attempts_clear_but_does_not_hide_transport_error(self):
         for result in (RuntimeError("offline"), {},
