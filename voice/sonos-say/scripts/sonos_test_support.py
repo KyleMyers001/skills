@@ -18,7 +18,11 @@ class FakeSpeaker:
     _visible = True
     _is_satellite = False
     _has_satellites = False
+    _household_id = 'household'
     ip_address = '192.0.2.2'
+    # Payload content is irrelevant: FakeZoneGroupState derives groups live.
+    zoneGroupTopology = SimpleNamespace(
+        GetZoneGroupState=lambda args, timeout: {'ZoneGroupState': ''})
 
     def __init__(self, uid='target'):
         self._uid = uid  # Cached parser identity, like SoCo.
@@ -91,8 +95,11 @@ class FakeZoneGroupState:
     def __init__(self, primary):
         self.primary = primary
 
-    def clear_cache(self):
-        pass
+    on_poll = None  # Tests inject read failures into each fresh poll here.
+
+    def process_payload(self, payload, source, source_ip):
+        if self.on_poll is not None:
+            self.on_poll()
 
     @property
     def visible_zones(self):

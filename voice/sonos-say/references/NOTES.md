@@ -118,15 +118,22 @@ is isolated and covered by real-parser subprocess contracts. Primary-only
 `has_satellites` flags on satellites do not establish ownership. Room names and
 visibility alone never prove a bond.
 
-Each independent inspection clears `zone_group_state`'s five-second polling
-cache before reading the group. Eligibility uses copied roles from that same
+Each independent inspection fetches one `GetZoneGroupState` payload directly,
+with explicit empty arguments and the check's timeout, and processes it into the
+shared state; an unknown household ID is fetched the same way. SoCo 0.31.2
+composes implicit arguments by downloading the service description under a fixed
+10-second timeout, so its no-argument getters are not used for observation. The
+processed payload primes SoCo's cache so the group lookup reads that sample
+without polling again. A 501 response (SoCo documents this for households of
+about 20+ players) fails immediately: SoCo's ZGT event fallback would open a
+topology subscription, which this skill never does. Eligibility uses copied roles from that same
 processed payload without public role getters, which can poll individual
 satellites and introduce new observations. No surround/sub needs to answer a
 separate role request. A changed `processed_count` during copying, or unavailable
-observation identity, still fails closed. This refreshes
+observation identity, still fails closed. This fetches fresh state for
 initial/pre-unjoin/pre-snapshot/pre-playback checks and every convergence
-sample, including coordinator-side restoration checks. Cache-clear/read failures
-fail closed. Active topology subscriptions bypass polling even after invalidation
+sample, including coordinator-side restoration checks. Read/processing failures
+fail closed. Active topology subscriptions can replace polled state at any time
 in SoCo 0.31.2; they are unsupported and refused rather than treated as fresh.
 Offline cache-aware tests do not establish firmware compatibility.
 
@@ -138,14 +145,20 @@ original owned satellites for a bonded room. Restoration
 accepts an already exact original coordinator/member set without a join RPC.
 Otherwise it joins only from the expected isolated-target/original-group-minus-
 target state. Convergence polls every 0.5 seconds for at most five seconds, always
-invalidating the cache and sleeping no longer than the remaining deadline.
+fetching a fresh payload and sleeping no longer than the remaining deadline.
 Unavailable target/coordinator observations retry within that pre-join deadline.
-Post-join convergence starts its own five-second budget and does not reuse leftover
-pre-join time. A missing group or role is structural and is not retried by
-isolation, pre-join, or post-join waits. Timeout, OS, SoCo, and transient runtime
-read failures stay temporary. Each owned poll sets SoCo's request timeout to the
-remaining check time, never above five seconds, and disables `ZGT_EVENT_FALLBACK`
-so a failed poll cannot open a subscription. Both settings are restored afterward.
+`restore_target_group`'s timeout applies separately to the pre-join wait, the join
+RPC, and post-join convergence, which does not reuse leftover pre-join time.
+A missing group or role is structural. Isolation checks fail on it immediately;
+post-unjoin, pre-join, and post-join convergence waits retry it within their
+deadline because a group change can briefly publish incomplete samples. Identity
+changes and unrelated topology seen by recovery still fail immediately. Timeout,
+OS, SoCo, and transient runtime read failures stay temporary. Each read passes the
+remaining check time as its request timeout, between half a second and five
+seconds: a retry that starts at the deadline still gets a usable timeout rather
+than zero, which requests rejects. Topology reads leave SoCo's global
+configuration untouched; only cleanup RPCs and the join RPC set its request
+timeout and disable `ZGT_EVENT_FALLBACK`, restoring both afterward.
 Observed unrelated topology fails immediately without joining. Sonos provides
 no atomic lock against other controllers changing topology during playback;
 fresh checks cannot eliminate the race between verification and a write.
@@ -162,7 +175,9 @@ is never retried into acceptance, and mutating RPCs are never replayed. If topol
 is unsafe or remains unavailable, cleanup skips transport writes and does not join,
 attempts safe independent target-local mute/volume recovery, and reports
 `SONOS_RESTORE_FAILED`. It does not repair bonds or join an unrelated group.
-Cleanup starts no further step after 45 seconds. `Snapshot.restore` remains one
+Cleanup starts no further step after 45 seconds. When a detached member awaits
+regrouping, local steps stop 15 seconds earlier (pre-join wait, join, post-join
+wait) so slow restoration cannot skip the rejoin. `Snapshot.restore` remains one
 step and is not split between its internal calls. Each cleanup RPC uses the same
 five-second SoCo request cap and does not enable topology-event fallback.
 
@@ -175,9 +190,12 @@ mute and volume when topology is unavailable or unsafe. SoCo's `uid` and even
 writes. A cached device-UID change alone is not a transport refusal. A different
 topology UUID is still refused. Identity reads have a five-second socket timeout,
 a 64 KiB body limit, strict UDN parsing, and no redirect/proxy following. Any
-DOCTYPE or ENTITY declaration is rejected before XML parsing. A failed or
-mismatched description skips local writes. A successful snapshot already restores
-mute; cleanup does not redundantly set it again.
+DOCTYPE or ENTITY declaration is rejected before XML parsing. Socket timeouts
+restart on every received byte, so the request runs in a worker thread with one
+five-second deadline for the whole exchange; a trickling responder is cut off.
+A failed or mismatched description skips local writes. A successful snapshot
+already restores mute; cleanup does not redundantly set it again. Volume is
+written explicitly because it was captured separately and is read back.
 
 A pre-mutation refusal skips transport/rendering restoration for every layout;
 an attempted unjoin still receives regroup-only recovery. State recovery is armed
@@ -186,7 +204,8 @@ fail.
 
 Safe cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring
 volume. An empty saved URI is cleared on idle standalone/bonded targets, not detached
-members awaiting regrouping. Mute, volume, source/transport where meaningful,
+members awaiting regrouping. Internal callers without a captured room plan clear
+only a confirmed coordinator; an unreadable coordinator state is a failure. Mute, volume, source/transport where meaningful,
 and cleared-URI read-back errors or mismatches are failures. Queue source checks
 use `GetMediaInfo.CurrentURI`, not a per-track URI. Cleanup continues
 attempting independent restoration steps after failures. Successful API calls are
@@ -210,6 +229,7 @@ pausing, non-start, and timeout produce `SONOS_PLAYBACK_FAILED` after cleanup.
 Playback deadlines bound polling, not every discovery or synthesis call.
 Topology polls and cleanup RPCs are separately capped at five seconds, and
 cleanup starts no further step after 45 seconds.
+Households whose `GetZoneGroupState` answers 501 fail with `SONOS_TOPOLOGY_FAILED`.
 
 An attempt-scoped AVTransport subscription starts before Play. A bounded,
 thread-safe queue sink retains ordered states during blocking RPCs, correlated

@@ -95,6 +95,9 @@ MAX_TEXT_CHARS = 5_000         # implementation limit; keep speech short
 # Sonos transition).
 PLAYBACK_START_TIMEOUT = 8.0
 CLEANUP_BUDGET_SECONDS = 45.0
+# Local restoration must leave a detached member time for its pre-join wait,
+# join RPC, and post-join wait.
+GROUP_RESTORE_RESERVE_SECONDS = 3 * TOPOLOGY_VERIFY_TIMEOUT
 ELEVENLABS_TTS_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
 OUTPUT_FORMAT = "mp3_44100_128"
 
@@ -742,6 +745,13 @@ def _bounded_cleanup_step(action, interrupts, warning: str, deadline: float) -> 
     return _run_cleanup_step(bounded, interrupts, warning)
 
 
+def _is_coordinator(speaker: soco.SoCo) -> bool:
+    coordinator = speaker.is_coordinator
+    if not isinstance(coordinator, bool):
+        raise RuntimeError("Coordinator state is unavailable")
+    return coordinator
+
+
 def _clear_temporary_uri(speaker: soco.SoCo) -> None:
     """Clear an announcement URI when the saved transport URI was empty."""
     transport_failed = False
@@ -780,35 +790,24 @@ def _restore_after_announcement(
     uri_cleared = False
     restored = False
     deadline = time.monotonic() + CLEANUP_BUDGET_SECONDS
+    # Steps before a required rejoin must not consume its time.
+    local_deadline = (deadline - GROUP_RESTORE_RESERVE_SECONDS
+                      if topology_mutated else deadline)
 
-    def run(action, warning: str) -> bool:
-        return _bounded_cleanup_step(action, interrupts, warning, deadline)
+    def run(action, warning: str, until: float = local_deadline) -> bool:
+        return _bounded_cleanup_step(action, interrupts, warning, until)
 
     def authorize_local() -> None:
-        nonlocal local_safe, restore_failed
-        if topology is None:
-            return
+        # Callers have already recorded the topology failure.
+        nonlocal local_safe
         local_safe = run(
             lambda: verify_target_identity(topology),
             "Could not verify target identity for local restoration",
         )
-        restore_failed = True
 
     def read_back(action, warning: str) -> None:
         nonlocal restore_failed
-        if time.monotonic() >= deadline:
-            log.warning(warning)
-            restore_failed = True
-            return
-        try:
-            with bounded_soco_request(max(0.0, deadline - time.monotonic())):
-                action()
-        except (KeyboardInterrupt, SystemExit) as exc:
-            interrupts.append(exc)
-            restore_failed = True
-        except Exception:
-            log.warning(warning)
-            restore_failed = True
+        restore_failed = not run(action, warning, deadline) or restore_failed
 
     if not state_mutated:
         # Snapshot reads alone create no transport/rendering recovery duty.
@@ -817,6 +816,7 @@ def _restore_after_announcement(
             regrouped = run(
                 lambda: restore_target_group(topology),
                 "Could not restore Sonos group",
+                deadline,
             )
             return not regrouped, interrupts[0] if interrupts else None
         return False, None
@@ -860,6 +860,16 @@ def _restore_after_announcement(
     if snapshot_taken and snapshot is not None:
         saved_uri = getattr(snapshot, "media_uri", None) or ""
         should_clear = not saved_uri and not topology_mutated and transport_safe
+        if should_clear and topology is None:
+            # Without a captured room plan, only a coordinator owns its URI;
+            # clearing a group member would pull it out of its group.
+            role: list[bool] = []
+            known = run(
+                lambda: role.append(_is_coordinator(speaker)),
+                "Could not read coordinator state before clearing URI",
+            )
+            restore_failed = restore_failed or not known
+            should_clear = role == [True]
         if should_clear:
             uri_cleared = run(
                 lambda: _clear_temporary_uri(speaker),
@@ -867,6 +877,8 @@ def _restore_after_announcement(
             )
             restore_failed = restore_failed or not uri_cleared
 
+    # Unlike mute, volume was captured separately and is read back below,
+    # so write it explicitly even after Snapshot.restore set it.
     if original_volume is not None and local_safe:
         volume_restored = run(
             lambda: setattr(speaker, "volume", original_volume),
@@ -880,6 +892,7 @@ def _restore_after_announcement(
         group_restored = run(
             lambda: restore_target_group(topology),
             "Could not restore Sonos group",
+            deadline,
         )
         restore_failed = restore_failed or not group_restored
     elif topology is not None and transport_safe:

@@ -81,8 +81,10 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   direct satellite/hidden targets, stereo pairs, and unknown topology are refused.
 - Read-only discovery and fresh topology validation precede Keychain lookup
   (bounded to 10 seconds) and synthesis. Synthesis finishes before any group
-  mutation. Independent safety observations invalidate SoCo's polling cache;
-  active topology subscriptions are unsupported and fail closed. Device roles
+  mutation. Each safety observation fetches a fresh zone-group payload directly;
+  active topology subscriptions are unsupported and fail closed. Households that
+  answer that request with 501 (SoCo notes about 20+ players) are unsupported
+  and fail immediately; no topology-event fallback is used. Device roles
   must come from the same processed observation. Exact room membership and
   satellite ownership are rechecked before snapshot and playback; concurrent
   controllers remain a risk.
@@ -111,10 +113,15 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   check after the last cleanup write. Do not run that check after a rejoin, and
   do not repair bonds or regroup an unrelated room.
 - Unavailable topology reads retry for at most five seconds per check.
-  A missing group or role fails immediately. Each SoCo observation or cleanup
-  RPC is capped at the remaining check time, never above five seconds, and must
-  not open a ZoneGroupTopology subscription. Post-join convergence has its own
-  five seconds. Cleanup starts no further step after 45 seconds. Unsafe topology
+  A missing group or role fails isolation checks immediately; post-unjoin,
+  pre-join, and post-join convergence waits retry such mid-transition samples
+  within their deadline. Each SoCo observation or cleanup RPC is capped at the
+  remaining check time, between half a second and five seconds, and must not
+  open a ZoneGroupTopology subscription. Recovery's pre-join wait, join RPC, and
+  post-join wait each get their own five seconds. Cleanup starts no further step
+  after 45 seconds; local steps for a detached member stop 15 seconds earlier so
+  the rejoin is still attempted. Live identity reads end after five seconds
+  in total, even if the device trickles its response. Unsafe topology
   is never retried into acceptance, and mutating RPCs are never replayed.
   Refusal before the first state-changing RPC incurs no restoration writes; an
   attempted unjoin still requires regroup-only recovery.

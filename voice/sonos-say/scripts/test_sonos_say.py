@@ -1877,6 +1877,20 @@ class TestEmptyUriClearing(unittest.TestCase):
         )
         sp.avTransport.SetAVTransportURI.assert_not_called()
 
+    def test_unplanned_non_coordinator_does_not_clear(self):
+        """Without a room plan, a group member's empty URI is left alone."""
+        for coordinator in (False, None):
+            with self.subTest(coordinator=coordinator):
+                sp = _set_standalone(MagicMock())
+                sp.is_coordinator = coordinator
+                snapshot = MagicMock(media_uri="", mute=False)
+                failed, _ = sonos_say._restore_after_announcement(
+                    sp, snapshot, True, 30, None, False,
+                )
+                self.assertIs(failed, coordinator is None)
+                sp.stop.assert_not_called()
+                sp.avTransport.SetAVTransportURI.assert_not_called()
+
     def test_unplanned_nonempty_snapshot_ignores_coordinator_flag(self):
         """Installed Snapshot callers pass topology=None and a nonempty URI."""
         sp = _set_standalone(MagicMock())
@@ -2150,6 +2164,29 @@ class TestRestoreVerification(unittest.TestCase):
         self.assertIsNone(interrupt)
         self.assertEqual(writes, [])
         snapshot.restore.assert_called_once_with(fade=False)
+
+    def test_slow_local_restoration_cannot_starve_rejoin(self):
+        sp = _set_standalone(MagicMock())
+        writes = []
+        type(sp).volume = property(
+            lambda self: 30, lambda self, value: writes.append(value),
+        )
+        snapshot = MagicMock(media_uri="prior-uri", mute=False)
+        clock = [0.0]
+
+        def slow_restore(fade=False):
+            clock[0] = sonos_say.CLEANUP_BUDGET_SECONDS - 1
+
+        snapshot.restore.side_effect = slow_restore
+        plan = sonos_say.validate_announcement_target(sp)
+        with patch.object(sonos_say.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch("sonos_say.restore_target_group") as regroup:
+            failed, _ = sonos_say._restore_after_announcement(
+                sp, snapshot, True, 30, plan, True,
+            )
+        self.assertTrue(failed)
+        self.assertEqual(writes, [])  # Local steps stop at the reserve.
+        regroup.assert_called_once_with(plan)
 
     def test_cleanup_rpc_caps_soco_timeout(self):
         import soco.config as config

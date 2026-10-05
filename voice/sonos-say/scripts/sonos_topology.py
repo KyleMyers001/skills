@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import http.client
 import ipaddress
+import socket
+import threading
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Optional
@@ -13,7 +15,13 @@ from typing import Any, Callable, Optional
 
 TOPOLOGY_POLL_SECONDS = 0.5
 TOPOLOGY_VERIFY_TIMEOUT = 5.0
+# requests rejects a zero timeout; a read started at its deadline still gets one.
+TOPOLOGY_MIN_READ_SECONDS = 0.5
 DEVICE_DESCRIPTION_LIMIT = 64 * 1024
+
+
+def _request_limit(seconds: float) -> float:
+    return min(TOPOLOGY_VERIFY_TIMEOUT, max(TOPOLOGY_MIN_READ_SECONDS, seconds))
 
 
 @contextmanager
@@ -22,7 +30,7 @@ def bounded_soco_request(seconds: float):
     import soco.config as config
     previous_timeout = config.REQUEST_TIMEOUT
     previous_fallback = config.ZGT_EVENT_FALLBACK
-    limit = min(TOPOLOGY_VERIFY_TIMEOUT, max(0.0, seconds))
+    limit = _request_limit(seconds)
     if (isinstance(previous_timeout, (int, float))
             and not isinstance(previous_timeout, bool)
             and previous_timeout < limit):
@@ -53,6 +61,12 @@ class _Deadline:
         return True
 
 
+def _unsupported_observation_error(exc: BaseException) -> bool:
+    """Large households answer GetZoneGroupState with 501; retrying cannot help."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 501 or str(getattr(exc, "error_code", "")) == "501"
+
+
 def _temporary_observation_error(exc: BaseException) -> bool:
     """Network stalls may be retried; malformed topology must not."""
     if isinstance(exc, (TimeoutError, OSError, RuntimeError)):
@@ -70,31 +84,33 @@ def _poll(
     *,
     accept: Optional[Callable[[Any], bool]] = None,
     wait_if_rejected: bool = False,
+    retry_structural: bool = False,
     rejected: str = "topology did not converge",
 ):
-    """Retry only TopologyUnavailable. Structural errors propagate."""
+    """Retry unavailable reads; retry structural read errors only on request.
+
+    Mid-transition samples after a group change may be structurally
+    incomplete. Errors raised by ``accept`` always propagate.
+    """
+    retryable = TopologyError if retry_structural else TopologyUnavailable
     deadline = _Deadline(timeout)
-    last_error: Optional[BaseException] = None
     while True:
-        remaining = deadline.remaining()
-        if timeout <= 0 and last_error is None:
+        last_error: Optional[BaseException] = None
+        if timeout <= 0:
             call_timeout = TOPOLOGY_VERIFY_TIMEOUT
         else:
-            call_timeout = min(TOPOLOGY_VERIFY_TIMEOUT, max(0.0, remaining))
+            call_timeout = _request_limit(deadline.remaining())
         try:
             observed = read(call_timeout)
-        except TopologyUnavailable as exc:
+        except retryable as exc:
             last_error = exc
-            observed = None
         else:
             if accept is None or accept(observed):
                 return observed
             if not wait_if_rejected:
                 raise TopologyError(rejected)
-            last_error = None
-        if timeout <= 0 or not deadline.pause():
-            if (observed is None
-                    and isinstance(last_error, TopologyUnavailable)
+        if not deadline.pause():
+            if (isinstance(last_error, TopologyUnavailable)
                     and not wait_if_rejected):
                 raise last_error
             raise TopologyError(rejected) from last_error
@@ -149,68 +165,92 @@ def _satellite_parent_uid(member: Any) -> Optional[str]:
     return None if parent is None else _uid(parent)
 
 
+def _fetch_zone_group_state(speaker: Any, timeout: float) -> Any:
+    """Process one fresh GetZoneGroupState payload under an explicit timeout.
+
+    Explicit empty argument lists matter: SoCo 0.31.2 composes implicit
+    arguments by downloading the service description with a fixed 10-second
+    timeout. Polling directly also never opens SoCo's ZGT event fallback.
+    """
+    if speaker._household_id is None:
+        # SoCo keys the shared state by household; its getter is unbounded.
+        speaker._household_id = speaker.deviceProperties.GetHouseholdID(
+            [], timeout=timeout,
+        )["CurrentHouseholdID"]
+    state = speaker.zone_group_state
+    # SoCo 0.31.2 lets subscription events replace polled state at any time.
+    if state.has_subscriptions is not False:
+        raise TopologyError("fresh polling is unavailable under subscriptions")
+    payload = speaker.zoneGroupTopology.GetZoneGroupState(
+        [], timeout=timeout,
+    )["ZoneGroupState"]
+    state.process_payload(
+        payload=payload, source="poll", source_ip=speaker.ip_address,
+    )
+    # SoCo's group lookup polls on cache expiry; make it read this payload.
+    state._cache_until = time.monotonic() + TOPOLOGY_VERIFY_TIMEOUT
+    return state
+
+
 def inspect_topology(
     speaker: Any, *, timeout: float = TOPOLOGY_VERIFY_TIMEOUT,
 ) -> TopologyPlan:
     """Observe physical grouping without imposing announcement eligibility."""
-    with bounded_soco_request(timeout):
+    try:
+        state = _fetch_zone_group_state(speaker, _request_limit(timeout))
+        group = speaker.group
+        if group is None:
+            raise TopologyError("group topology is missing")
         try:
-            state = speaker.zone_group_state
-            # SoCo 0.31.2 skips polling under subscriptions, even after invalidation.
-            if state.has_subscriptions is not False:
-                raise TopologyError(
-                    "fresh polling is unavailable under subscriptions"
-                )
-            state.clear_cache()
-            group = speaker.group
-            if group is None:
-                raise TopologyError("group topology is missing")
-            try:
-                coordinator = group.coordinator
-                members = tuple(group.members)
-            except AttributeError as exc:
-                raise TopologyError("group topology is malformed") from exc
-            sample = state.processed_count
-            if not isinstance(sample, int) or isinstance(sample, bool):
-                raise TopologyError(
-                    "topology observation identity is unavailable"
-                )
-            speaker_uid = _uid(speaker)
-            coordinator_uid = _uid(coordinator)
-            member_topology: list[_MemberTopology] = []
-            # SoCo 0.31.2 public role getters poll each member's topology state.
-            # Copy only parser-populated fields/visibility from the primary sample;
-            # satellites need not answer independent requests to prove ownership.
-            visible_zones = state.visible_zones.copy()
-            for member in members:
-                try:
-                    satellite = member._is_satellite
-                    has_satellites = member._has_satellites
-                    parent_uid = (
-                        _satellite_parent_uid(member)
-                        if satellite is True else None
-                    )
-                except AttributeError as exc:
-                    raise TopologyError("speaker role is unavailable") from exc
-                member_topology.append(_MemberTopology(
-                    uid=_uid(member),
-                    visible=member in visible_zones,
-                    satellite=satellite,
-                    has_satellites=has_satellites,
-                    parent_uid=parent_uid,
-                ))
-            # Retain the guard against asynchronous changes to the shared state.
-            if (state.has_subscriptions is not False
-                    or state.processed_count != sample):
-                raise TopologyError("topology changed during observation")
-        except TopologyError:
-            raise
-        except Exception as exc:
-            if _temporary_observation_error(exc):
-                raise TopologyUnavailable(
-                    "group topology is unavailable"
-                ) from exc
+            coordinator = group.coordinator
+            members = tuple(group.members)
+        except AttributeError as exc:
             raise TopologyError("group topology is malformed") from exc
+        sample = state.processed_count
+        if not isinstance(sample, int) or isinstance(sample, bool):
+            raise TopologyError(
+                "topology observation identity is unavailable"
+            )
+        speaker_uid = _uid(speaker)
+        coordinator_uid = _uid(coordinator)
+        member_topology: list[_MemberTopology] = []
+        # SoCo 0.31.2 public role getters poll each member's topology state.
+        # Copy only parser-populated fields/visibility from the primary sample;
+        # satellites need not answer independent requests to prove ownership.
+        visible_zones = state.visible_zones.copy()
+        for member in members:
+            try:
+                satellite = member._is_satellite
+                has_satellites = member._has_satellites
+                parent_uid = (
+                    _satellite_parent_uid(member)
+                    if satellite is True else None
+                )
+            except AttributeError as exc:
+                raise TopologyError("speaker role is unavailable") from exc
+            member_topology.append(_MemberTopology(
+                uid=_uid(member),
+                visible=member in visible_zones,
+                satellite=satellite,
+                has_satellites=has_satellites,
+                parent_uid=parent_uid,
+            ))
+        # Retain the guard against asynchronous changes to the shared state.
+        if (state.has_subscriptions is not False
+                or state.processed_count != sample):
+            raise TopologyError("topology changed during observation")
+    except TopologyError:
+        raise
+    except Exception as exc:
+        if _unsupported_observation_error(exc):
+            raise TopologyError(
+                "group topology polling is unsupported by this household"
+            ) from exc
+        if _temporary_observation_error(exc):
+            raise TopologyUnavailable(
+                "group topology is unavailable"
+            ) from exc
+        raise TopologyError("group topology is malformed") from exc
     if not members:
         raise TopologyError("group topology has no members")
 
@@ -267,19 +307,48 @@ def validate_announcement_target(
     return plan
 
 
+def _fetch_device_description(connection: http.client.HTTPConnection) -> bytes:
+    connection.request("GET", "/xml/device_description.xml")
+    response = connection.getresponse()
+    if response.status != 200:
+        raise ValueError("device description request failed")
+    return response.read(DEVICE_DESCRIPTION_LIMIT + 1)
+
+
 def _read_device_uid(speaker: Any) -> str:
-    """Read UDN directly: even get_speaker_info(refresh=True) uses cached uid."""
+    """Read UDN directly: even get_speaker_info(refresh=True) uses cached uid.
+
+    Socket timeouts restart on every received byte, so a trickling responder
+    could outlast them. A worker thread gives the whole exchange one deadline.
+    """
     connection = None
     try:
         host = str(ipaddress.IPv4Address(speaker.ip_address))
         connection = http.client.HTTPConnection(
             host, 1400, timeout=TOPOLOGY_VERIFY_TIMEOUT,
         )
-        connection.request("GET", "/xml/device_description.xml")
-        response = connection.getresponse()
-        if response.status != 200:
-            raise ValueError("device description request failed")
-        body = response.read(DEVICE_DESCRIPTION_LIMIT + 1)
+        outcome: dict[str, Any] = {}
+
+        def fetch() -> None:
+            try:
+                outcome["body"] = _fetch_device_description(connection)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=fetch, daemon=True)
+        worker.start()
+        worker.join(TOPOLOGY_VERIFY_TIMEOUT)
+        if worker.is_alive():
+            sock = connection.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)  # wake the blocked read
+                except OSError:
+                    pass
+            raise TimeoutError("device description request timed out")
+        if "error" in outcome:
+            raise outcome["error"]
+        body = outcome["body"]
         if len(body) > DEVICE_DESCRIPTION_LIMIT:
             raise ValueError("device description is too large")
         folded = body.upper()
@@ -346,6 +415,7 @@ def _wait_for_topology(
             and observed.member_uids == expected_member_uids
         ),
         wait_if_rejected=True,
+        retry_structural=True,
         rejected="exact group topology did not converge",
     )
 
@@ -388,7 +458,11 @@ def restore_target_group(
     plan: TopologyPlan,
     timeout: float = TOPOLOGY_VERIFY_TIMEOUT,
 ) -> None:
-    """Rejoin the target to its exact prior coordinator and verify it."""
+    """Rejoin the target to its exact prior coordinator and verify it.
+
+    ``timeout`` bounds each phase: the pre-join wait, the join RPC, and the
+    post-join wait.
+    """
     if not plan.detach:
         return
     expected_without_target = plan.member_uids - {plan.speaker_uid}
@@ -399,44 +473,36 @@ def restore_target_group(
             inspect_topology(plan.coordinator, timeout=call_timeout),
         )
 
-    def ready(observed) -> bool:
+    def classify(observed) -> Optional[str]:
         target, coordinator = observed
         if (target.speaker_uid != plan.speaker_uid
                 or coordinator.speaker_uid != plan.coordinator_uid):
             raise TopologyError("recovery device identity changed")
-        original = (
-            target.coordinator_uid == coordinator.coordinator_uid
-            == plan.coordinator_uid
-            and target.member_uids == coordinator.member_uids == plan.member_uids
-        )
-        if original:
-            return True
-        detached = (
-            target.coordinator_uid == plan.speaker_uid
-            and target.member_uids == frozenset({plan.speaker_uid})
-            and coordinator.coordinator_uid == plan.coordinator_uid
-            and coordinator.member_uids == expected_without_target
-        )
-        if detached:
-            return True
+        if (target.coordinator_uid == coordinator.coordinator_uid
+                == plan.coordinator_uid
+                and target.member_uids == coordinator.member_uids
+                == plan.member_uids):
+            return "original"
+        if (target.coordinator_uid == plan.speaker_uid
+                and target.member_uids == frozenset({plan.speaker_uid})
+                and coordinator.coordinator_uid == plan.coordinator_uid
+                and coordinator.member_uids == expected_without_target):
+            return "detached"
         if (target.coordinator_uid not in (plan.speaker_uid, plan.coordinator_uid)
                 or coordinator.coordinator_uid != plan.coordinator_uid
                 or not target.member_uids <= plan.member_uids
                 or not coordinator.member_uids <= plan.member_uids):
             raise TopologyError("unrelated topology cannot be restored safely")
-        return False
+        return None
 
-    target, coordinator = _poll(
-        read, timeout, accept=ready, wait_if_rejected=True,
+    observed = _poll(
+        read, timeout, accept=lambda sample: classify(sample) is not None,
+        wait_if_rejected=True, retry_structural=True,
         rejected="recovery topology did not converge",
     )
-    already_original = (
-        target.coordinator_uid == coordinator.coordinator_uid == plan.coordinator_uid
-        and target.member_uids == coordinator.member_uids == plan.member_uids
-    )
-    if already_original:
+    if classify(observed) == "original":
         return  # RPC may have failed before mutation, or rejoin already completed.
-    with bounded_soco_request(TOPOLOGY_VERIFY_TIMEOUT):
+    with bounded_soco_request(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT):
         try:
             plan.speaker.join(plan.coordinator)
         except Exception as exc:
@@ -446,7 +512,7 @@ def restore_target_group(
             plan.speaker,
             plan.coordinator_uid,
             plan.member_uids,
-            TOPOLOGY_VERIFY_TIMEOUT,
+            timeout,
         )
     except Exception as exc:
         raise TopologyError(

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
+import http.server
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import sonos_topology as topology
-from sonos_test_support import FakeSpeaker, make_bonded_room
+from sonos_test_support import FakeSpeaker, loopback_server, make_bonded_room
 
 
 def _speaker(uid: str) -> MagicMock:
@@ -443,13 +446,17 @@ class _Household:
     def clear_cache(self):
         self.cache_until = -1.0
 
+    def process_payload(self, payload, source, source_ip):
+        self.cache_until = -1.0
+        self.group(None)
+
     def group(self, uid):
         if not self.has_subscriptions and self.now >= self.cache_until:
             self.cached = dict(self.live)
             self.cache_until = self.now + 5
             self.samples += 1
             self.processed_count += 1
-        return self.cached[uid]
+        return self.cached.get(uid)
 
     @property
     def visible_zones(self):
@@ -470,6 +477,10 @@ class _Household:
 class _CachedSpeaker:
     _is_satellite = False
     _has_satellites = False
+    _household_id = "household"
+    ip_address = "192.0.2.2"
+    zoneGroupTopology = SimpleNamespace(
+        GetZoneGroupState=lambda args, timeout: {"ZoneGroupState": ""})
 
     def __init__(self, uid, household):
         self._uid = uid
@@ -555,7 +566,7 @@ class TestFreshTopology(unittest.TestCase):
         self.target.unjoin.assert_not_called()
 
     def test_cache_clear_and_network_read_errors_fail_closed(self):
-        for method in ("clear_cache", "group"):
+        for method in ("process_payload", "group"):
             with self.subTest(method=method):
                 with patch.object(self.household, method,
                                   side_effect=RuntimeError("unavailable")):
@@ -666,6 +677,37 @@ class TestIdentityDescription(unittest.TestCase):
         )
 
 
+class TestIdentityDeadline(unittest.TestCase):
+    def test_trickling_description_cannot_outlast_one_deadline(self):
+        class Trickle(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    for _ in range(50):  # Each byte restarts a socket timeout.
+                        self.wfile.write(b' ')
+                        self.wfile.flush()
+                        time.sleep(0.1)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        target = FakeSpeaker()
+        target.ip_address = '127.0.0.1'
+        with loopback_server(Trickle) as port:
+            def connect(host, _port, timeout):
+                return http.client.HTTPConnection(host, port, timeout=timeout)
+
+            with patch.object(topology, 'TOPOLOGY_VERIFY_TIMEOUT', 0.5), \
+                    patch.object(topology.http.client, 'HTTPConnection', connect):
+                started = time.monotonic()
+                with self.assertRaises(topology.TopologyError):
+                    topology._read_device_uid(target)
+                self.assertLess(time.monotonic() - started, 2)
+
+
 class TestTopologyReadRetries(unittest.TestCase):
     def setUp(self):
         self.target, self.coord = FakeSpeaker(), FakeSpeaker('coord')
@@ -765,7 +807,7 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.assertGreaterEqual(self.now, 9.5)
         self.assertLess(self.now, 10.5)
 
-    def test_structural_topology_errors_fail_without_retry(self):
+    def test_isolation_check_fails_structural_errors_without_retry(self):
         plan = topology.validate_announcement_target(self.target)
         self.target.group = None
         with self.assertRaises(topology.TopologyError) as raised:
@@ -773,26 +815,57 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
         self.sleep.assert_not_called()
 
+    def test_convergence_waits_retry_mid_transition_samples(self):
         missing = SimpleNamespace(_uid='target', _has_satellites=False)
+        settled = self.target.group
         self.target.group = SimpleNamespace(
             coordinator=self.target, members=[missing],
         )
-        self.sleep.reset_mock()
-        with self.assertRaises(topology.TopologyError) as raised:
-            topology._wait_for_topology(
-                self.target, self.target.uid, frozenset({self.target.uid}), 5,
-            )
-        self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
-        self.sleep.assert_not_called()
 
+        def settle(seconds):
+            self.advance(seconds)
+            self.target.group = settled
+
+        self.sleep.side_effect = settle
+        observed = topology._wait_for_topology(
+            self.target, self.target.uid, frozenset({self.target.uid}), 5,
+        )
+        self.assertEqual(observed.member_uids, frozenset({'target'}))
+        self.assertEqual(self.now, 0.5)
+
+    def test_recovery_retries_structural_samples_but_is_bounded_without_join(self):
         grouped = self.grouped_plan()
         grouped.speaker.group = None
-        self.sleep.reset_mock()
         with self.assertRaises(topology.TopologyError) as raised:
-            topology.restore_target_group(grouped, timeout=5)
+            topology.restore_target_group(grouped, timeout=0.7)
         self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
-        self.sleep.assert_not_called()
+        self.assertEqual(self.now, 0.7)
         grouped.speaker.join.assert_not_called()
+
+    def test_final_retry_still_gets_a_usable_read_timeout(self):
+        seen = []
+
+        def unavailable(speaker, timeout):
+            seen.append(timeout)
+            raise topology.TopologyUnavailable()
+
+        with patch.object(topology, 'inspect_topology', side_effect=unavailable):
+            with self.assertRaises(topology.TopologyError):
+                topology._wait_for_topology(
+                    self.target, 'target', frozenset({'target'}), 5,
+                )
+        self.assertEqual(self.now, 5)
+        self.assertEqual(len(seen), 11)
+        self.assertEqual(min(seen), topology.TOPOLOGY_MIN_READ_SECONDS)
+        self.assertEqual(max(seen), topology.TOPOLOGY_VERIFY_TIMEOUT)
+
+    def test_recovery_timeout_bounds_the_post_join_wait(self):
+        plan = self.grouped_plan()
+        self.target.join.side_effect = None  # Publication never converges.
+        with self.assertRaises(topology.TopologyError):
+            topology.restore_target_group(plan, timeout=1)
+        self.target.join.assert_called_once()
+        self.assertEqual(self.now, 1)
 
     def test_temporary_read_errors_retry_until_the_check_deadline(self):
         import soco.exceptions
@@ -811,25 +884,51 @@ class TestTopologyReadRetries(unittest.TestCase):
                 def fail(exc=error):
                     raise exc
 
-                self.target.zone_group_state.clear_cache = fail
+                self.target.zone_group_state.on_poll = fail
                 with self.assertRaises(topology.TopologyUnavailable):
                     topology.verify_isolated_target(plan, timeout=0.7)
                 self.assertEqual(self.now, 0.7)
 
-    def test_poll_caps_soco_timeout_and_disables_event_fallback(self):
+    def test_unsupported_zone_group_state_fails_without_retry(self):
+        class HTTPError(OSError):  # requests.HTTPError's shape
+            response = SimpleNamespace(status_code=501)
+
+        class UPnPError(RuntimeError):  # SoCoUPnPException's shape
+            error_code = '501'
+
+        plan = topology.validate_announcement_target(self.target)
+        for error in (HTTPError(), UPnPError()):
+            with self.subTest(error=type(error).__name__):
+                def fail(exc=error):
+                    raise exc
+
+                self.target.zone_group_state.on_poll = fail
+                with self.assertRaises(topology.TopologyError) as raised:
+                    topology.verify_isolated_target(plan, timeout=5)
+                self.assertNotIsInstance(
+                    raised.exception, topology.TopologyUnavailable)
+                self.sleep.assert_not_called()
+
+    def test_poll_passes_explicit_args_and_capped_timeout(self):
         import soco.config as config
-        seen = []
         target = FakeSpeaker()
+        target._household_id = None
+        target.deviceProperties = SimpleNamespace(GetHouseholdID=MagicMock(
+            return_value={'CurrentHouseholdID': 'household'}))
+        target.zoneGroupTopology = SimpleNamespace(GetZoneGroupState=MagicMock(
+            return_value={'ZoneGroupState': ''}))
         previous = (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK)
-
-        def clear():
-            seen.append((config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK))
-
-        target.zone_group_state.clear_cache = clear
-        topology.inspect_topology(target)
-        self.assertEqual(seen, [(5.0, False)])
+        target.zone_group_state.on_poll = lambda: self.assertEqual(
+            (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK), previous)
+        topology.inspect_topology(target, timeout=30)
+        topology.inspect_topology(target, timeout=0)
+        target.deviceProperties.GetHouseholdID.assert_called_once_with(
+            [], timeout=5.0)
+        self.assertEqual(target._household_id, 'household')
         self.assertEqual(
-            (config.REQUEST_TIMEOUT, config.ZGT_EVENT_FALLBACK), previous,
+            target.zoneGroupTopology.GetZoneGroupState.call_args_list,
+            [unittest.mock.call([], timeout=5.0),
+             unittest.mock.call([], timeout=topology.TOPOLOGY_MIN_READ_SECONDS)],
         )
 
 
@@ -882,6 +981,7 @@ _SDK_TOPOLOGY = r'''
 import sys
 from unittest.mock import patch
 import soco
+import soco.services
 from soco.zonegroupstate import ZoneGroupState
 import sonos_topology as topology
 assert soco.__version__ == '0.31.2'
@@ -903,18 +1003,27 @@ def document(extra=''):
 state = ZoneGroupState()
 current = [document()]
 calls = [0]
-def poll(speaker):
+# Fixed signatures: SoCo's implicit-argument path would raise TypeError here
+# instead of downloading a service description.
+def get_zone_group_state(service, args, timeout):
+    assert args == [] and 0 < timeout <= 5
     calls[0] += 1
     if sys.argv[1] == 'changing' and calls[0] == 2:
         current[0] = document(other_xml)
-    state.process_payload(current[0], source='test', source_ip='192.0.2.2')
+    return {'ZoneGroupState': current[0]}
+def get_household_id(service, args, timeout):
+    assert args == [] and 0 < timeout <= 5
+    return {'CurrentHouseholdID': 'household'}
 state.process_payload(current[0], source='test', source_ip='192.0.2.2')
 primary = next(iter(state.groups)).coordinator
 def primary_state(speaker):
     assert speaker is primary, 'satellite queried for roles'
     return state
 with patch.object(soco.SoCo, 'zone_group_state', property(primary_state)), \
-     patch.object(state, 'poll', poll):
+     patch.object(soco.services.ZoneGroupTopology, 'GetZoneGroupState',
+                  get_zone_group_state, create=True), \
+     patch.object(soco.services.DeviceProperties, 'GetHouseholdID',
+                  get_household_id, create=True):
     if sys.argv[1] == 'changing':
         # No getter can trigger a second poll while capturing roles.
         plan = topology.validate_announcement_target(primary)

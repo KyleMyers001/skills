@@ -130,7 +130,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
                     if len(calls) == failing_sample:
                         raise TimeoutError('temporary topology read failure')
                 def finish(*args, **kwargs):
-                    self.speaker.zone_group_state.clear_cache = clear
+                    self.speaker.zone_group_state.on_poll = clear
                     return True
                 self.wait.side_effect = finish
                 with patch.object(topology.time, 'sleep') as sleep:
@@ -146,7 +146,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         calls, mute_writes = [], []
         mute = [True]
         def finish(*args, **kwargs):
-            self.speaker.zone_group_state.clear_cache = lambda: calls.append(True)
+            self.speaker.zone_group_state.on_poll = lambda: calls.append(True)
             return True
         self.wait.side_effect = finish
         def set_mute(value):
@@ -169,7 +169,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
             restore(snapshot, **kwargs)
             self.speaker.device_uid = 'replacement'
             self.speaker.volume, self.speaker.mute = 77, False
-            self.speaker.zone_group_state.clear_cache = unavailable
+            self.speaker.zone_group_state.on_poll = unavailable
         now = [0.0]
         with patch.object(FakeSnapshot, 'restore', changed), \
                 patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
@@ -186,7 +186,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
             raise TimeoutError()
         def finish(*args, **kwargs):
             self.speaker.device_uid = 'replacement'
-            self.speaker.zone_group_state.clear_cache = unavailable
+            self.speaker.zone_group_state.on_poll = unavailable
             return True
         self.wait.side_effect = finish
         with self.assertRaises(say.SonosSayError) as raised:
@@ -247,7 +247,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         def fail_cache():
             raise RuntimeError('unavailable')
         def unavailable(*args, **kwargs):
-            self.speaker.zone_group_state.clear_cache = fail_cache
+            self.speaker.zone_group_state.on_poll = fail_cache
             return True
         self.wait.side_effect = unavailable
         with self.assertRaises(say.SonosSayError) as raised:
@@ -638,7 +638,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
                 def finish(*args, **kwargs):
                     def unavailable():
                         raise TimeoutError('topology')
-                    self.speaker.zone_group_state.clear_cache = unavailable
+                    self.speaker.zone_group_state.on_poll = unavailable
                     return True
 
                 self.wait.side_effect = finish
@@ -666,7 +666,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.group()
 
         def finish(*args, **kwargs):
-            self.speaker.zone_group_state.clear_cache = (
+            self.speaker.zone_group_state.on_poll = (
                 lambda: (_ for _ in ()).throw(TimeoutError('topology'))
             )
             return True
