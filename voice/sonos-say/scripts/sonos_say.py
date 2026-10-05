@@ -60,6 +60,7 @@ from elevenlabs_voice import (  # noqa: E402
 )
 from sonos_topology import (  # noqa: E402
     TopologyError,
+    TOPOLOGY_VERIFY_TIMEOUT,
     detach_target,
     restore_target_group,
     validate_announcement_target,
@@ -761,23 +762,31 @@ def _restore_after_announcement(
     interrupts: list[BaseException] = []
     restore_failed = False
     uri_cleared = False
-    bonded_room = topology is not None and bool(topology.satellite_parents)
-    if bonded_room and not state_mutated:
-        return False, None  # A read-only refusal creates no recovery obligation.
+    if not state_mutated:
+        # Snapshot reads alone create no transport/rendering recovery duty.
+        # An attempted unjoin still requires exact group recovery, and only that.
+        if topology_mutated:
+            restored = _run_cleanup_step(
+                lambda: restore_target_group(topology), interrupts,
+                "Could not restore Sonos group",
+            )
+            return not restored, interrupts[0] if interrupts else None
+        return False, None
 
     local_safe = transport_safe = True
-    if bonded_room:
+    if topology is not None:
         local_safe = _run_cleanup_step(
             lambda: verify_target_identity(topology), interrupts,
             "Could not verify target identity for restoration",
         )
         transport_safe = local_safe and _run_cleanup_step(
-            lambda: verify_isolated_target(topology), interrupts,
-            "Could not verify bonded room for transport restoration",
+            lambda: verify_isolated_target(topology, TOPOLOGY_VERIFY_TIMEOUT),
+            interrupts, "Could not verify room for transport restoration",
         )
         restore_failed = not transport_safe
 
     if snapshot_taken and snapshot is not None:
+        restored = False
         if transport_safe:
             restored = _run_cleanup_step(
                 lambda: snapshot.restore(fade=False),
@@ -785,42 +794,47 @@ def _restore_after_announcement(
                 "Could not restore transport state",
             )
             restore_failed = restore_failed or not restored
-        if bonded_room:
-            # Snapshot.restore includes transport writes. If those are unsafe
-            # or fail, still recover target-local rendering state independently.
+            if topology is not None:
+                # One post-restore sample also guards the next transport write
+                # (empty-URI clearing); do not poll a third time for that case.
+                transport_safe = _run_cleanup_step(
+                    lambda: verify_isolated_target(topology, TOPOLOGY_VERIFY_TIMEOUT),
+                    interrupts, "Could not verify restored room topology",
+                )
+                restore_failed = restore_failed or not transport_safe
+        if (topology is not None and local_safe
+                and (not restored or not transport_safe)):
+            # A failed/skipped restore or post-check can outlive an IP change.
+            # Local fallback needs new identity proof independent of topology.
             local_safe = _run_cleanup_step(
                 lambda: verify_target_identity(topology), interrupts,
                 "Could not verify target identity for local restoration",
             )
             restore_failed = restore_failed or not local_safe
-            if local_safe:
-                mute_restored = _run_cleanup_step(
-                    lambda: setattr(speaker, "mute", snapshot.mute), interrupts,
-                    "Could not restore mute",
-                )
-                restore_failed = restore_failed or not mute_restored
+        if not restored and local_safe:
+            # Snapshot already restored mute on success; do not write it twice.
+            mute_restored = _run_cleanup_step(
+                lambda: setattr(speaker, "mute", snapshot.mute), interrupts,
+                "Could not restore mute",
+            )
+            restore_failed = restore_failed or not mute_restored
 
         saved_uri = getattr(snapshot, "media_uri", None) or ""
-        try:
-            should_clear = False
-            if not saved_uri and not topology_mutated and transport_safe:
+        should_clear = not saved_uri and not topology_mutated and transport_safe
+        if should_clear and topology is None:
+            # Compatibility for internal callers without a captured room plan.
+            try:
                 coordinator = speaker.is_coordinator
                 if not isinstance(coordinator, bool):
                     raise RuntimeError("Coordinator state is unavailable")
                 should_clear = coordinator
-        except (KeyboardInterrupt, SystemExit) as exc:
-            interrupts.append(exc)
-            restore_failed = True
-            should_clear = False
-        except Exception:
-            restore_failed = True
-            should_clear = False
-        if should_clear and bonded_room:
-            should_clear = _run_cleanup_step(
-                lambda: verify_isolated_target(topology), interrupts,
-                "Could not verify bonded room before clearing transport",
-            )
-            restore_failed = restore_failed or not should_clear
+            except (KeyboardInterrupt, SystemExit) as exc:
+                interrupts.append(exc)
+                restore_failed = True
+                should_clear = False
+            except Exception:
+                restore_failed = True
+                should_clear = False
         if should_clear:
             uri_cleared = _run_cleanup_step(
                 lambda: _clear_temporary_uri(speaker),
@@ -837,7 +851,7 @@ def _restore_after_announcement(
         )
         restore_failed = restore_failed or not volume_restored
 
-    if topology_mutated:
+    if topology_mutated and local_safe:
         group_restored = _run_cleanup_step(
             lambda: restore_target_group(topology),
             interrupts,
@@ -888,13 +902,6 @@ def _restore_after_announcement(
         except Exception:
             log.warning("Could not verify cleared transport URI")
             restore_failed = True
-
-    if bonded_room:
-        topology_restored = _run_cleanup_step(
-            lambda: verify_isolated_target(topology), interrupts,
-            "Could not verify restored bonded room topology",
-        )
-        restore_failed = restore_failed or not topology_restored
 
     pending_interrupt = interrupts[0] if interrupts else None
     return restore_failed, pending_interrupt

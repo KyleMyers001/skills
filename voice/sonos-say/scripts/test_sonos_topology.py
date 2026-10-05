@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import subprocess
@@ -16,10 +17,10 @@ from sonos_test_support import FakeSpeaker, make_bonded_room
 
 def _speaker(uid: str) -> MagicMock:
     speaker = MagicMock()
-    speaker.uid = uid
-    speaker.is_satellite = False
-    speaker.has_satellites = False
-    speaker.is_visible = True
+    speaker.uid = speaker._uid = uid
+    speaker._is_satellite = False
+    speaker._has_satellites = False
+    speaker._visible = True
     speaker.zone_group_state.has_subscriptions = False
     speaker.zone_group_state.processed_count = 0
     return speaker
@@ -37,6 +38,9 @@ def _set_group(
     speaker.group = group
     for member in members:
         member.group = group
+        member.zone_group_state.visible_zones = {
+            visible for visible in members if visible._visible
+        }
 
 
 def _isolate(
@@ -83,12 +87,14 @@ class TestTopologyLifecycle(unittest.TestCase):
         target.play_uri.assert_not_called()
 
     def test_bonded_hidden_or_unknown_target_is_not_eligible(self):
-        for name, value in (("is_satellite", True), ("has_satellites", True),
-                            ("is_visible", False), ("has_satellites", None)):
+        for name, value in (("_is_satellite", True), ("_has_satellites", True),
+                            ("_visible", False), ("_has_satellites", None)):
             with self.subTest(name=name, value=value):
                 target = _speaker("target")
                 _set_group(target, target, [target])
                 setattr(target, name, value)
+                if name == '_visible':
+                    target.zone_group_state.visible_zones = set()
                 with self.assertRaises(topology.TopologyError):
                     topology.validate_announcement_target(target)
 
@@ -108,6 +114,20 @@ class TestTopologyLifecycle(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology.detach_target(plan)
         target.unjoin.assert_not_called()
+
+    def test_cached_uid_is_not_live_identity_evidence(self):
+        target = _speaker('target')
+        _set_group(target, target, [target])
+        plan = topology.validate_announcement_target(target)
+        xml = (b'<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+               b'<UDN>uuid:replacement</UDN></device></root>')
+        with patch('http.client.HTTPConnection') as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status = 200
+            response.read.return_value = xml
+            with self.assertRaises(topology.TopologyError):
+                topology.verify_target_identity(plan)
+        self.assertEqual(target.uid, 'target')
 
     def test_member_detaches_and_rejoins_exact_coordinator(self):
         target = _speaker("target")
@@ -253,8 +273,10 @@ class TestBondedRoomEligibility(unittest.TestCase):
         self.assertFalse(plan.detach)
         self.assertEqual(plan.room_member_uids,
                          frozenset(member.uid for member in (primary, *satellites)))
-        self.assertEqual(plan.satellite_parents,
-                         frozenset((sat.uid, primary.uid) for sat in satellites))
+        self.assertEqual(
+            {member.parent_uid for member in plan.member_topology
+             if member.satellite}, {primary.uid},
+        )
         for member in (primary, *satellites):
             member.unjoin.assert_not_called()
             member.join.assert_not_called()
@@ -273,7 +295,7 @@ class TestBondedRoomEligibility(unittest.TestCase):
 
     def test_unknown_or_contradictory_bonding_fails_closed(self):
         cases = ('missing-parent', 'foreign-parent', 'unknown-satellite',
-                 'unknown-visibility', 'missing-satellites', 'duplicate',
+                 'missing-satellites', 'duplicate',
                  'unknown-primary', 'contradictory-primary')
         for case in cases:
             with self.subTest(case=case):
@@ -283,17 +305,15 @@ class TestBondedRoomEligibility(unittest.TestCase):
                 elif case == 'foreign-parent':
                     satellites[0]._satellite_parent = FakeSpeaker('foreign')
                 elif case == 'unknown-satellite':
-                    satellites[0].is_satellite = None
-                elif case == 'unknown-visibility':
-                    satellites[0].is_visible = None
+                    satellites[0]._is_satellite = None
                 elif case == 'missing-satellites':
                     primary.group.members = [primary]
                 elif case == 'duplicate':
-                    satellites[0].uid = satellites[1].uid
+                    satellites[0]._uid = satellites[1].uid
                 elif case == 'unknown-primary':
-                    primary.has_satellites = None
+                    primary._has_satellites = None
                 elif case == 'contradictory-primary':
-                    primary.has_satellites = False
+                    primary._has_satellites = False
                 with self.assertRaises(topology.TopologyError):
                     topology.validate_announcement_target(primary)
                 primary.unjoin.assert_not_called()
@@ -303,14 +323,14 @@ class TestBondedRoomEligibility(unittest.TestCase):
         primary, satellites = make_bonded_room()
         with self.assertRaises(topology.TopologyError):
             topology.validate_announcement_target(satellites[0])
-        primary.is_visible = False
+        primary._visible = False
         with self.assertRaises(topology.TopologyError):
             topology.validate_announcement_target(primary)
 
     def test_satellite_primary_only_flags_do_not_determine_ownership(self):
         primary, satellites = make_bonded_room()
-        satellites[0].has_satellites = None
-        satellites[1].has_satellites = True
+        satellites[0]._has_satellites = None
+        satellites[1]._has_satellites = True
         topology.validate_announcement_target(primary)
 
     def test_bonded_member_of_multiroom_group_is_never_detached(self):
@@ -329,26 +349,26 @@ class TestBondedRoomEligibility(unittest.TestCase):
             with self.subTest(change=change):
                 primary, satellites = make_bonded_room()
                 plan = topology.validate_announcement_target(primary)
-                saved_parents = frozenset((sat.uid, primary.uid) for sat in satellites)
+                saved_roles = plan.member_topology
                 if change == 'parent':
                     satellites[0]._satellite_parent = FakeSpeaker('foreign')
                 elif change == 'remove':
                     primary.group.members.remove(satellites[0])
                 elif change == 'add':
                     extra = FakeSpeaker('new-satellite')
-                    extra.is_visible, extra.is_satellite = False, True
+                    extra._visible, extra._is_satellite = False, True
                     extra._satellite_parent = primary
                     primary.group.members.append(extra)
                 else:
                     primary.group.coordinator = satellites[0]
-                self.assertEqual(plan.satellite_parents, saved_parents)
+                self.assertEqual(plan.member_topology, saved_roles)
                 self.assertEqual(len(plan.room_member_uids), 3)
                 with self.assertRaises(topology.TopologyError):
                     topology.verify_isolated_target(plan)
 
     def test_raw_inspection_keeps_unknown_eligibility_flags(self):
         primary, satellites = make_bonded_room()
-        primary.has_satellites = None
+        primary._has_satellites = None
         plan = topology.inspect_topology(primary)
         self.assertEqual(len(plan.member_uids), 3)
         self.assertIsNone(next(member for member in plan.member_topology
@@ -356,16 +376,41 @@ class TestBondedRoomEligibility(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology.validate_announcement_target(primary)
 
-    def test_role_getters_cannot_mix_processed_topology_observations(self):
-        primary = _speaker('target')
-        _set_group(primary, primary, [primary])
+    def test_public_role_getters_are_never_read(self):
+        primary, satellites = make_bonded_room()
+        with contextlib.ExitStack() as stack:
+            for role in ('uid', 'is_visible', 'is_satellite', 'has_satellites'):
+                stack.enter_context(patch.object(
+                    FakeSpeaker, role, new_callable=PropertyMock,
+                    side_effect=RuntimeError('satellite unreachable'),
+                ))
+            plan = topology.validate_announcement_target(primary)
+        self.assertEqual(len(plan.room_member_uids), 3)
+
+    def test_asynchronous_state_change_during_copy_fails_closed(self):
+        primary, satellites = make_bonded_room()
+        state = primary.zone_group_state
         def newer_sample():
-            primary.zone_group_state.processed_count += 1
-            return True
-        with patch.object(type(primary), 'is_visible', create=True,
+            state.processed_count += 1
+            return {primary}
+        with patch.object(type(state), 'visible_zones',
                           new_callable=PropertyMock, side_effect=newer_sample):
             with self.assertRaises(topology.TopologyError):
                 topology.validate_announcement_target(primary)
+
+    def test_fake_uid_and_roles_are_read_only(self):
+        speaker = FakeSpeaker()
+        for role in ('uid', 'is_visible', 'is_satellite', 'has_satellites'):
+            with self.subTest(role=role), self.assertRaises(AttributeError):
+                setattr(speaker, role, None)
+
+    def test_missing_processed_visibility_fails_closed(self):
+        primary, satellites = make_bonded_room()
+        with patch.object(type(primary.zone_group_state), 'visible_zones',
+                          new_callable=PropertyMock, return_value=None):
+            with self.assertRaises(topology.TopologyError):
+                topology.validate_announcement_target(primary)
+        primary.play_uri.assert_not_called()
 
     def test_missing_observation_identity_is_refused(self):
         primary, satellites = make_bonded_room()
@@ -398,6 +443,11 @@ class _Household:
             self.processed_count += 1
         return self.cached[uid]
 
+    @property
+    def visible_zones(self):
+        return {member for group in self.cached.values()
+                for member in group.members}
+
     def group_members(self, coordinator, members):
         group = SimpleNamespace(coordinator=coordinator, members=members)
         for member in members:
@@ -410,15 +460,18 @@ class _Household:
 
 
 class _CachedSpeaker:
-    is_satellite = False
-    has_satellites = False
-    is_visible = True
+    _is_satellite = False
+    _has_satellites = False
 
     def __init__(self, uid, household):
-        self.uid = uid
+        self._uid = uid
         self.zone_group_state = household
         self.unjoin = MagicMock()
         self.join = MagicMock()
+
+    @property
+    def uid(self):
+        return self._uid
 
     @property
     def group(self):
@@ -502,6 +555,7 @@ class TestFreshTopology(unittest.TestCase):
                         topology.inspect_topology(self.target)
 
     def test_eligibility_uses_the_same_sampled_group(self):
+        self.target.group  # Populate parsed visibility before overriding the getter.
         with patch.object(type(self.target), "group",
                           new_callable=PropertyMock) as group:
             group.side_effect = [self.household.live["target"],
@@ -531,6 +585,154 @@ class TestFreshTopology(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology.detach_target(plan, before_unjoin=lambda: attempted.append(True))
         self.assertIs(self.household.live["target"].coordinator, self.target)
+
+
+class TestIdentityDescription(unittest.TestCase):
+    def setUp(self):
+        self.target = FakeSpeaker()
+        self.plan = topology.validate_announcement_target(self.target)
+        connection = patch('http.client.HTTPConnection')
+        self.connection = connection.start()
+        self.addCleanup(connection.stop)
+        self.response = self.connection.return_value.getresponse.return_value
+        self.response.status = 200
+
+    def description(self, udn):
+        return (f'<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+                f'<UDN>{udn}</UDN></device></root>').encode()
+
+    def test_live_description_matches_without_reusing_cached_uid(self):
+        self.response.read.return_value = self.description('uuid:target')
+        topology.verify_target_identity(self.plan)
+        self.connection.assert_called_once_with('192.0.2.2', 1400, timeout=5.0)
+        self.connection.return_value.request.assert_called_once_with(
+            'GET', '/xml/device_description.xml')
+        self.response.read.assert_called_once_with(topology.DEVICE_DESCRIPTION_LIMIT + 1)
+        self.connection.return_value.close.assert_called_once()
+
+    def test_missing_malformed_and_replacement_udns_fail_closed(self):
+        bodies = [self.description(value) for value in
+                  ('uuid:replacement', 'target', 'uuid:', 'uuid: target')]
+        bodies += [b'<broken', b'<root/>',
+                   b'x' * (topology.DEVICE_DESCRIPTION_LIMIT + 1)]
+        for body in bodies:
+            with self.subTest(body=body[:40]):
+                self.response.read.return_value = body
+                with self.assertRaises(topology.TopologyError):
+                    topology.verify_target_identity(self.plan)
+        self.assertEqual(self.target.uid, 'target')
+        self.assertEqual(self.connection.return_value.close.call_count, len(bodies))
+
+    def test_redirects_errors_and_unavailable_device_fail_closed(self):
+        for status in (301, 302, 404, 500):
+            with self.subTest(status=status):
+                self.response.status = status
+                with self.assertRaises(topology.TopologyError):
+                    topology.verify_target_identity(self.plan)
+        self.response.read.assert_not_called()
+        self.connection.return_value.getresponse.side_effect = TimeoutError()
+        with self.assertRaises(topology.TopologyError):
+            topology.verify_target_identity(self.plan)
+        self.assertEqual(self.connection.return_value.close.call_count, 5)
+
+
+class TestTopologyReadRetries(unittest.TestCase):
+    def setUp(self):
+        self.target, self.coord = FakeSpeaker(), FakeSpeaker('coord')
+        self.now = 0.0
+        clock = patch.object(topology.time, 'monotonic', side_effect=lambda: self.now)
+        sleep = patch.object(topology.time, 'sleep', side_effect=self.advance)
+        clock.start()
+        self.sleep = sleep.start()
+        self.addCleanup(clock.stop)
+        self.addCleanup(sleep.stop)
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def grouped_plan(self):
+        self.target.group = self.coord.group = SimpleNamespace(
+            coordinator=self.coord, members=[self.coord, self.target])
+        plan = topology.validate_announcement_target(self.target)
+        self.target.isolate()
+        return plan
+
+    def test_isolation_retries_unavailable_sample_and_then_succeeds(self):
+        plan = topology.validate_announcement_target(self.target)
+        observed = topology.inspect_topology(self.target)
+        with patch.object(topology, 'inspect_topology', side_effect=[
+            topology.TopologyUnavailable(), observed,
+        ]) as inspect:
+            topology.verify_isolated_target(plan, timeout=1)
+        self.assertEqual(inspect.call_count, 2)
+        self.assertEqual(self.now, 0.5)
+
+    def test_isolation_unavailable_is_bounded_and_unsafe_is_not_retried(self):
+        plan = topology.validate_announcement_target(self.target)
+        with patch.object(topology, 'inspect_topology',
+                          side_effect=topology.TopologyUnavailable()):
+            with self.assertRaises(topology.TopologyError):
+                topology.verify_isolated_target(plan, timeout=0.7)
+        self.assertEqual(self.now, 0.7)
+        self.target.group.members.append(self.coord)
+        self.sleep.reset_mock()
+        with self.assertRaises(topology.TopologyError):
+            topology.verify_isolated_target(plan, timeout=5)
+        self.sleep.assert_not_called()
+
+    def test_unsafe_sample_after_read_failure_is_not_retried_into_acceptance(self):
+        plan = topology.validate_announcement_target(self.target)
+        safe = topology.inspect_topology(self.target)
+        self.target.group.members.append(self.coord)
+        unsafe = topology.inspect_topology(self.target)
+        with patch.object(topology, 'inspect_topology', side_effect=[
+            topology.TopologyUnavailable(), unsafe, safe,
+        ]) as inspect:
+            with self.assertRaises(topology.TopologyError):
+                topology.verify_isolated_target(plan, timeout=5)
+        self.assertEqual(inspect.call_count, 2)
+        self.assertEqual(self.now, 0.5)
+
+    def test_recovery_retries_either_unavailable_room_without_replaying_join(self):
+        for failing_uid in ('target', 'coord'):
+            with self.subTest(failing_uid=failing_uid):
+                plan = self.grouped_plan()
+                inspect = topology.inspect_topology
+                failed = []
+                def transient(speaker):
+                    if speaker.uid == failing_uid and not failed:
+                        failed.append(True)
+                        raise topology.TopologyUnavailable()
+                    return inspect(speaker)
+                with patch.object(topology, 'inspect_topology', side_effect=transient):
+                    topology.restore_target_group(plan, timeout=1)
+                self.target.join.assert_called_once_with(self.coord)
+                self.target.join.reset_mock()
+
+    def test_recovery_unavailable_is_bounded_without_join(self):
+        plan = self.grouped_plan()
+        with patch.object(topology, 'inspect_topology',
+                          side_effect=topology.TopologyUnavailable()):
+            with self.assertRaises(topology.TopologyError):
+                topology.restore_target_group(plan, timeout=0.7)
+        self.assertEqual(self.now, 0.7)
+        self.target.join.assert_not_called()
+
+    def test_post_join_uses_remaining_deadline(self):
+        plan = self.grouped_plan()
+        inspect = topology.inspect_topology
+        failed = []
+        def transient(speaker):
+            if not failed:
+                failed.append(True)
+                raise topology.TopologyUnavailable()
+            return inspect(speaker)
+        self.target.join.side_effect = None  # Publication never converges.
+        with patch.object(topology, 'inspect_topology', side_effect=transient):
+            with self.assertRaises(topology.TopologyError):
+                topology.restore_target_group(plan, timeout=0.7)
+        self.assertEqual(self.now, 0.7)
+        self.target.join.assert_called_once()
 
 
 class TestIdempotentTopology(unittest.TestCase):
@@ -610,20 +812,29 @@ def poll(speaker):
     state.process_payload(current[0], source='test', source_ip='192.0.2.2')
 state.process_payload(current[0], source='test', source_ip='192.0.2.2')
 primary = next(iter(state.groups)).coordinator
-with patch.object(soco.SoCo, 'zone_group_state', property(lambda self: state)), \
+def primary_state(speaker):
+    assert speaker is primary, 'satellite queried for roles'
+    return state
+with patch.object(soco.SoCo, 'zone_group_state', property(primary_state)), \
      patch.object(state, 'poll', poll):
     if sys.argv[1] == 'changing':
+        # No getter can trigger a second poll while capturing roles.
+        plan = topology.validate_announcement_target(primary)
+        assert calls[0] == 1
+        assert plan.room_member_uids == frozenset({'primary', 'left', 'right'})
         try:
-            topology.validate_announcement_target(primary)
+            topology.verify_isolated_target(plan)
         except topology.TopologyError:
-            assert state.processed_count == 2
+            assert calls[0] == 2 and state.processed_count == 2
         else:
-            raise AssertionError('mixed processed observations accepted')
-        print('mixed observations refused')
+            raise AssertionError('later unsafe observation accepted')
+        print('single observation copied; later drift refused')
     else:
         plan = topology.validate_announcement_target(primary)
+        assert calls[0] == 1
         assert plan.room_member_uids == frozenset({'primary', 'left', 'right'})
-        assert plan.satellite_parents == frozenset({('left', 'primary'), ('right', 'primary')})
+        assert {(member.uid, member.parent_uid) for member in plan.member_topology
+                if member.satellite} == {('left', 'primary'), ('right', 'primary')}
         assert not plan.detach
         topology.verify_isolated_target(plan)
         current[0] = document(other_xml)
@@ -651,8 +862,43 @@ class TestInstalledTopologyContracts(unittest.TestCase):
     def test_owned_satellites_and_multiroom_partition_with_real_sdk(self):
         self.run_contract('stable', 'owned satellites accepted; same-named second room refused')
 
-    def test_new_payload_during_role_reads_fails_closed_with_real_sdk(self):
-        self.run_contract('changing', 'mixed observations refused')
+    def test_roles_use_one_payload_and_later_drift_is_refused_with_real_sdk(self):
+        self.run_contract('changing', 'single observation copied; later drift refused')
+
+    def test_real_soco_cached_uid_cannot_authorize_replacement_device(self):
+        code = r'''
+import http.client
+from unittest.mock import patch
+import soco
+import sonos_topology as topology
+assert soco.__version__ == '0.31.2'
+speaker = soco.SoCo('192.0.2.2')
+speaker._uid = 'cached-primary'
+plan = topology.TopologyPlan(
+    coordinator=speaker, coordinator_uid=speaker.uid, detach=False,
+    member_uids=frozenset({speaker.uid}), member_topology=(),
+    room_member_uids=frozenset({speaker.uid}), speaker=speaker, speaker_uid=speaker.uid)
+with patch.object(http.client, 'HTTPConnection') as connection:
+    response = connection.return_value.getresponse.return_value
+    response.status = 200
+    response.read.return_value = b'<root xmlns="urn:schemas-upnp-org:device-1-0"><device><UDN>uuid:replacement</UDN></device></root>'
+    try:
+        topology.verify_target_identity(plan)
+    except topology.TopologyError:
+        assert speaker.uid == 'cached-primary'
+        connection.return_value.request.assert_called_once()
+    else:
+        raise AssertionError('cached UID authorized replacement')
+print('real cached UID ignored; replacement refused')
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', code],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent),
+                 'PYTHONDONTWRITEBYTECODE': '1'},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('real cached UID ignored; replacement refused', result.stdout)
 
 
 if __name__ == "__main__":

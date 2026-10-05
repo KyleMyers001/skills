@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import http.client
+import ipaddress
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Callable, Optional
 
 
 TOPOLOGY_POLL_SECONDS = 0.5
 TOPOLOGY_VERIFY_TIMEOUT = 5.0
+DEVICE_DESCRIPTION_LIMIT = 64 * 1024
 
 
 class TopologyError(RuntimeError):
     """The target's group topology is unsafe or could not be restored."""
+
+
+class TopologyUnavailable(TopologyError):
+    """A fresh observation failed; a later read may succeed safely."""
 
 
 @dataclass(frozen=True)
@@ -20,7 +28,7 @@ class _MemberTopology:
     """Device roles copied from one processed SoCo topology observation."""
 
     uid: str
-    visible: Any
+    visible: bool
     satellite: Any
     has_satellites: Any
     parent_uid: Optional[str]
@@ -34,17 +42,15 @@ class TopologyPlan:
     coordinator_uid: str
     detach: bool
     member_uids: frozenset[str]
-    members: tuple[Any, ...]
     member_topology: tuple[_MemberTopology, ...]
     room_member_uids: frozenset[str]
-    satellite_parents: frozenset[tuple[str, str]]
     speaker: Any
     speaker_uid: str
 
 
 def _uid(speaker: Any) -> str:
     try:
-        uid = speaker.uid
+        uid = speaker._uid
     except Exception as exc:
         raise TopologyError("speaker identity is unavailable") from exc
     if not isinstance(uid, str) or not uid.strip():
@@ -75,23 +81,28 @@ def inspect_topology(speaker: Any) -> TopologyPlan:
         speaker_uid = _uid(speaker)
         coordinator_uid = _uid(coordinator)
         member_topology: list[_MemberTopology] = []
+        # SoCo 0.31.2 public role getters poll each member's topology state.
+        # Copy only parser-populated fields/visibility from the primary sample;
+        # satellites need not answer independent requests to prove ownership.
+        visible_zones = state.visible_zones.copy()
         for member in members:
-            satellite = member.is_satellite
+            satellite = member._is_satellite
             member_topology.append(_MemberTopology(
                 uid=_uid(member),
-                visible=member.is_visible,
+                visible=member in visible_zones,
                 satellite=satellite,
-                has_satellites=member.has_satellites,
+                has_satellites=member._has_satellites,
                 parent_uid=(_satellite_parent_uid(member)
                             if satellite is True else None),
             ))
-        # Public role getters can poll again if the SDK cache expires. Never
-        # combine membership from one processed payload with roles from another.
+        # Retain the guard against asynchronous changes to the shared state.
         if (state.has_subscriptions is not False
                 or state.processed_count != sample):
             raise TopologyError("topology changed during observation")
+    except TopologyError:
+        raise
     except Exception as exc:
-        raise TopologyError("group topology is unavailable") from exc
+        raise TopologyUnavailable("group topology is unavailable") from exc
     if not members:
         raise TopologyError("group topology has no members")
 
@@ -111,10 +122,8 @@ def inspect_topology(speaker: Any) -> TopologyPlan:
         coordinator_uid=coordinator_uid,
         detach=len(members) > 1 and not target_is_coordinator,
         member_uids=frozenset(member_uids),
-        members=members,
         member_topology=tuple(member_topology),
         room_member_uids=frozenset({speaker_uid}),
-        satellite_parents=frozenset(),
         speaker=speaker,
         speaker_uid=speaker_uid,
     )
@@ -131,17 +140,13 @@ def validate_announcement_target(speaker: Any) -> TopologyPlan:
     if target.has_satellites is True:
         if plan.detach or len(plan.member_uids) == 1:
             raise TopologyError("bonded room is grouped or malformed")
-        parents: set[tuple[str, str]] = set()
         for member in plan.member_topology:
             if member.uid == plan.speaker_uid:
                 continue
             if (member.satellite is not True
-                    or not isinstance(member.visible, bool)
                     or member.parent_uid != plan.speaker_uid):
                 raise TopologyError("bonded room is grouped or malformed")
-            parents.add((member.uid, plan.speaker_uid))
-        return replace(plan, room_member_uids=plan.member_uids,
-                       satellite_parents=frozenset(parents))
+        return replace(plan, room_member_uids=plan.member_uids)
 
     for member in plan.member_topology:
         if (member.visible is not True or member.satellite is not False
@@ -152,20 +157,65 @@ def validate_announcement_target(speaker: Any) -> TopologyPlan:
     return plan
 
 
+def _read_device_uid(speaker: Any) -> str:
+    """Read UDN directly: even get_speaker_info(refresh=True) uses cached uid."""
+    connection = None
+    try:
+        host = str(ipaddress.IPv4Address(speaker.ip_address))
+        connection = http.client.HTTPConnection(
+            host, 1400, timeout=TOPOLOGY_VERIFY_TIMEOUT,
+        )
+        connection.request("GET", "/xml/device_description.xml")
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("device description request failed")
+        body = response.read(DEVICE_DESCRIPTION_LIMIT + 1)
+        if len(body) > DEVICE_DESCRIPTION_LIMIT:
+            raise ValueError("device description is too large")
+        udn = ET.fromstring(body).findtext(
+            "{urn:schemas-upnp-org:device-1-0}device/"
+            "{urn:schemas-upnp-org:device-1-0}UDN"
+        )
+        if not isinstance(udn, str) or not udn.startswith("uuid:"):
+            raise ValueError("device UDN is unavailable")
+        uid = udn[5:]
+        if not uid or uid != uid.strip():
+            raise ValueError("device UDN is malformed")
+        return uid
+    except Exception as exc:
+        raise TopologyError("live target identity is unavailable") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def verify_target_identity(plan: TopologyPlan) -> None:
-    """Local rendering cleanup must never write to a replacement identity."""
-    if _uid(plan.speaker) != plan.speaker_uid:
+    """Rendering cleanup must never trust a cached UID at a reassigned IP."""
+    if _read_device_uid(plan.speaker) != plan.speaker_uid:
         raise TopologyError("target identity changed")
 
 
-def verify_isolated_target(plan: TopologyPlan) -> None:
-    """Recheck exact logical-room membership and bonds before transport writes."""
-    observed = validate_announcement_target(plan.speaker)
-    if (observed.speaker_uid != plan.speaker_uid
-            or observed.coordinator_uid != plan.speaker_uid
-            or observed.member_uids != plan.room_member_uids
-            or observed.satellite_parents != plan.satellite_parents):
-        raise TopologyError("target room is not isolated or its bonds changed")
+def verify_isolated_target(
+    plan: TopologyPlan, timeout: float = 0,
+) -> None:
+    """Retry unavailable reads only; observed unsafe rooms fail immediately."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            observed = validate_announcement_target(plan.speaker)
+        except TopologyUnavailable:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(TOPOLOGY_POLL_SECONDS, remaining))
+            continue
+        # Eligibility already proves every satellite belongs to this primary.
+        # Exact membership thus also proves the captured ownership links.
+        if (observed.speaker_uid != plan.speaker_uid
+                or observed.coordinator_uid != plan.speaker_uid
+                or observed.member_uids != plan.room_member_uids):
+            raise TopologyError("target room is not isolated or its bonds changed")
+        return
 
 
 def _wait_for_topology(
@@ -238,8 +288,18 @@ def restore_target_group(
     expected_without_target = plan.member_uids - {plan.speaker_uid}
     deadline = time.monotonic() + timeout
     while True:
-        target = inspect_topology(plan.speaker)
-        coordinator = inspect_topology(plan.coordinator)
+        try:
+            target = inspect_topology(plan.speaker)
+            coordinator = inspect_topology(plan.coordinator)
+        except TopologyUnavailable:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(TOPOLOGY_POLL_SECONDS, remaining))
+            continue
+        if (target.speaker_uid != plan.speaker_uid
+                or coordinator.speaker_uid != plan.coordinator_uid):
+            raise TopologyError("recovery device identity changed")
         original = (
             target.coordinator_uid == coordinator.coordinator_uid == plan.coordinator_uid
             and target.member_uids == coordinator.member_uids == plan.member_uids
@@ -272,7 +332,7 @@ def restore_target_group(
             plan.speaker,
             plan.coordinator_uid,
             plan.member_uids,
-            timeout,
+            max(0, deadline - time.monotonic()),
         )
     except Exception as exc:
         raise TopologyError(

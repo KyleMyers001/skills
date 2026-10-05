@@ -32,8 +32,8 @@ restoring = False
 mute_state, volume_state = [True], [30]
 target, coord = MagicMock(), MagicMock()
 for uid, sp in (("target", target), ("coord", coord)):
-    sp.uid, sp.is_visible = uid, True
-    sp.is_satellite, sp.has_satellites = False, False
+    sp.uid = sp._uid = uid
+    sp._is_satellite, sp._has_satellites = False, False
     sp.zone_group_state.has_subscriptions = False
     sp.zone_group_state.processed_count = 0
     sp.volume, sp.ip_address, sp.mute = 30, "192.0.2.2", False
@@ -56,6 +56,7 @@ def group(coordinator, members):
     view = types.SimpleNamespace(coordinator=coordinator, members=members)
     for member in members:
         member.group = view
+        member.zone_group_state.visible_zones = set(members)
 
 group(coord, [coord, target])
 def interrupt(at):
@@ -121,7 +122,8 @@ class Temporary(tempfile.TemporaryDirectory):
         return super().__exit__(*args)
 
 outcome = 0
-with patch("sonos_say.discover_speaker", discover), \
+with patch("sonos_topology._read_device_uid", side_effect=lambda sp: sp._uid), \
+     patch("sonos_say.discover_speaker", discover), \
      patch("sonos_say.validate_announcement_target", validation), \
      patch("sonos_say.get_api_key", return_value="dummy-key"), \
      patch("sonos_say.local_ip_toward", return_value="192.0.2.1"), \

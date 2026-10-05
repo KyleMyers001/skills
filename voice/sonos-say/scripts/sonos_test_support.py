@@ -15,20 +15,19 @@ TEST_CONFIG = {
 
 
 class FakeSpeaker:
-    is_visible = True
-    is_satellite = False
-    has_satellites = False
+    _visible = True
+    _is_satellite = False
+    _has_satellites = False
     ip_address = '192.0.2.2'
 
     def __init__(self, uid='target'):
-        self.uid = uid
+        self._uid = uid  # Cached parser identity, like SoCo.
+        self.device_uid = uid  # Independent identity at this IP.
         self.volume = 30
         self.mute = True
         self.uri = 'http://example.invalid/radio'
         self.state = 'STOPPED'
-        self.zone_group_state = SimpleNamespace(
-            has_subscriptions=False, processed_count=0, clear_cache=lambda: None,
-        )
+        self.zone_group_state = FakeZoneGroupState(self)
         self.group = SimpleNamespace(coordinator=self, members=[self])
         self.avTransport = SimpleNamespace(GetMediaInfo=self.media,
                                            SetAVTransportURI=MagicMock(side_effect=self.set_uri))
@@ -37,6 +36,22 @@ class FakeSpeaker:
         self.unjoin = MagicMock(side_effect=self.isolate)
         self.stop = MagicMock(side_effect=lambda: setattr(self, 'state', 'STOPPED'))
         self.before_play = None
+
+    @property
+    def uid(self):
+        return self._uid
+
+    @property
+    def is_visible(self):
+        return self in self.zone_group_state.visible_zones
+
+    @property
+    def is_satellite(self):
+        return self._is_satellite
+
+    @property
+    def has_satellites(self):
+        return self._has_satellites
 
     @property
     def is_coordinator(self):
@@ -69,16 +84,32 @@ class FakeSpeaker:
         self.group = coord.group = SimpleNamespace(coordinator=coord, members=[coord, self])
 
 
+class FakeZoneGroupState:
+    has_subscriptions = False
+    processed_count = 0
+
+    def __init__(self, primary):
+        self.primary = primary
+
+    def clear_cache(self):
+        pass
+
+    @property
+    def visible_zones(self):
+        return {member for member in self.primary.group.members
+                if member._visible}
+
+
 def make_bonded_room(primary=None):
     """One visible home-theater primary with explicitly owned satellites."""
     primary = primary if primary is not None else FakeSpeaker()
-    primary.has_satellites = True
+    primary._has_satellites = True
     satellites = (FakeSpeaker('satellite-left'), FakeSpeaker('satellite-right'))
     members = [primary, *satellites]
     group = SimpleNamespace(coordinator=primary, members=members)
     for index, satellite in enumerate(satellites, start=3):
-        satellite.is_visible = False
-        satellite.is_satellite = True
+        satellite._visible = False
+        satellite._is_satellite = True
         satellite._satellite_parent = primary
         satellite.ip_address = f'192.0.2.{index}'
     for member in members:

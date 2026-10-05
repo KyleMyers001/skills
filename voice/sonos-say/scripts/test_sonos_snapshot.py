@@ -9,7 +9,7 @@ import unittest
 class TestInstalledSnapshotContracts(unittest.TestCase):
     def test_bonded_primary_tv_and_empty_sources_with_real_sdk(self):
         code = r'''
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import soco
 from soco.snapshot import Snapshot
 import sonos_say as say
@@ -26,8 +26,9 @@ for uri, state in (('x-sonos-htastream:primary:spdif', 'PLAYING'), ('', 'STOPPED
     snapshot.snapshot()
     primary.play_uri('http://example.invalid/announcement')
     primary.volume, primary.mute = 35, False
-    failed, interrupt = say._restore_after_announcement(
-        primary, snapshot, True, 30, plan, False, state_mutated=True)
+    with patch('sonos_topology._read_device_uid', return_value=primary.device_uid):
+        failed, interrupt = say._restore_after_announcement(
+            primary, snapshot, True, 30, plan, False, state_mutated=True)
     assert not failed and interrupt is None
     assert primary.uri == uri and primary.state == state
     assert primary.volume == 30 and primary.mute is True

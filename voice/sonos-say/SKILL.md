@@ -101,11 +101,14 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   pausing, non-start, and timeout cannot prove success.
 - After snapshot, the target is temporarily unmuted for delivery. Original mute
   and volume must be restored and read back; mismatches are restoration failures.
-  Bonded cleanup verifies the same room and bonds before transport restoration and
-  afterward. Unsafe topology prevents transport/group writes, but independent
-  primary-local mute/volume recovery is attempted if its identity still matches.
-  No automatic bond repair or regrouping is made. A bonded refusal before the
-  first state-changing RPC incurs no restoration writes.
+  Every target is rechecked for exact isolation before transport restoration and
+  afterward, including detached ordinary members. Unavailable topology reads
+  retry boundedly; observed unsafe topology is never retried into acceptance.
+  Unsafe topology prevents transport/group writes, but target-local mute/volume
+  fallback requires fresh device-description identity, never SoCo's cached UID.
+  No automatic bond repair or unrelated regrouping is made. Refusal before the
+  first state-changing RPC incurs no restoration writes; an attempted unjoin
+  still requires regroup-only recovery.
 - Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
   deletion. Cleanup attempts captured transport, URI, volume, and group
   restoration; group recovery is armed only at a validated unjoin RPC attempt.

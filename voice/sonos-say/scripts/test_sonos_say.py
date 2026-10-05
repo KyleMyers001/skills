@@ -75,12 +75,19 @@ _TEST_ENV = patch.dict(os.environ, {
 }, clear=True)
 
 
+_IDENTITY_FIXTURE = patch(
+    'sonos_topology._read_device_uid', side_effect=lambda sp: sp._uid,
+)
+
+
 def setUpModule():
     _TEST_ENV.start()
     _EVENT_FIXTURE.start()
+    _IDENTITY_FIXTURE.start()
 
 
 def tearDownModule():
+    _IDENTITY_FIXTURE.stop()
     _EVENT_FIXTURE.stop()
     _TEST_ENV.stop()
 
@@ -91,10 +98,10 @@ def tearDownModule():
 
 def _set_standalone(sp: MagicMock) -> MagicMock:
     """Give a mock speaker an explicit, valid standalone topology."""
-    sp.uid = "RINCON_TEST_TARGET"
-    sp.is_satellite = False
-    sp.has_satellites = False
-    sp.is_visible = True
+    sp.uid = sp._uid = "RINCON_TEST_TARGET"
+    sp._is_satellite = False
+    sp._has_satellites = False
+    sp.zone_group_state.visible_zones = {sp}
     sp.zone_group_state.has_subscriptions = False
     sp.zone_group_state.processed_count = 0
     sp.is_coordinator = True
@@ -668,8 +675,8 @@ class TestAnnounceOrchestration(unittest.TestCase):
 
         snap.restore.assert_not_called()
 
-    def test_volume_not_restored_if_getter_fails(self):
-        """Getter failure propagates; snapshot.restore still runs."""
+    def test_volume_getter_failure_before_mutation_does_not_restore(self):
+        """A failed read creates no transport/rendering recovery obligation."""
         sp = _set_standalone(MagicMock())
         sp.ip_address = "192.168.1.50"
         type(sp).volume = property(
@@ -694,7 +701,8 @@ class TestAnnounceOrchestration(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 sonos_say.announce("Hello", room="Test Room", volume=35, dry_run=False)
 
-        snap.restore.assert_called_once()
+        snap.restore.assert_not_called()
+        sp.play_uri.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -707,14 +715,12 @@ class TestGroupedAnnouncement(unittest.TestCase):
         events: list[str] = []
         target = MagicMock()
         coordinator = MagicMock()
-        target.uid = "RINCON_TARGET"
-        target.is_satellite = False
-        target.has_satellites = False
-        target.is_visible = True
-        coordinator.uid = "RINCON_COORDINATOR"
-        coordinator.is_satellite = False
-        coordinator.has_satellites = False
-        coordinator.is_visible = True
+        target.uid = target._uid = "RINCON_TARGET"
+        target._is_satellite = False
+        target._has_satellites = False
+        coordinator.uid = coordinator._uid = "RINCON_COORDINATOR"
+        coordinator._is_satellite = False
+        coordinator._has_satellites = False
         target.zone_group_state.has_subscriptions = False
         coordinator.zone_group_state.has_subscriptions = False
         target.zone_group_state.processed_count = 0
@@ -732,6 +738,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
             )
             for member in members:
                 member.group = group
+                member.zone_group_state.visible_zones = set(members)
 
         _group(coordinator, [coordinator, target])
 
@@ -824,9 +831,8 @@ class TestGroupedAnnouncement(unittest.TestCase):
     def test_grouped_coordinator_refused_before_mutation(self):
         coordinator, events, target = self._grouped_speakers()
         coordinator.ip_address = "192.0.2.5"
-        coordinator.is_satellite = False
-        coordinator.has_satellites = False
-        coordinator.is_visible = True
+        coordinator._is_satellite = False
+        coordinator._has_satellites = False
         snapshots = []
         with self.assertRaises(sonos_say.SonosSayError) as raised:
             self._announce(coordinator, snapshot_capture=snapshots)
@@ -848,7 +854,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
             self._announce(target, snapshot_capture=snapshots)
         self.assertEqual(raised.exception.code, "SONOS_TOPOLOGY_FAILED")
         target.play_uri.assert_not_called()
-        snapshots[0].restore.assert_called_once()
+        snapshots[0].restore.assert_not_called()
         self.assertEqual(target.volume, 30)
         self.assertEqual(events, ["detach", "rejoin"])
         target.join.assert_called_once_with(coordinator)
@@ -905,7 +911,7 @@ class TestGroupedAnnouncement(unittest.TestCase):
     def test_precondition_drift_does_not_arm_recovery(self):
         _, events, target = self._grouped_speakers()
         other = _set_standalone(MagicMock())
-        other.uid = "other"
+        other.uid = other._uid = "other"
 
         def regroup(*args, **kwargs):
             group = SimpleNamespace(coordinator=other, members=[other, target])
@@ -1797,11 +1803,10 @@ class TestRestoreOrderingAndFade(unittest.TestCase):
 class TestEmptyUriClearing(unittest.TestCase):
     """When the pre-announcement media URI was empty, clear the AV transport URI."""
 
-    def _run_with_saved_uri(self, saved_uri, is_coordinator=True, transport_states=None):
+    def _run_with_saved_uri(self, saved_uri, transport_states=None):
         """Run announce() and return the mock speaker."""
         sp = _set_standalone(MagicMock())
         sp.ip_address = "192.168.1.50"
-        sp.is_coordinator = is_coordinator
         sp.volume = 30
         sp.get_current_track_info.return_value = {"uri": ""}
 
@@ -1857,9 +1862,17 @@ class TestEmptyUriClearing(unittest.TestCase):
         )
         sp.avTransport.SetAVTransportURI.assert_not_called()
 
-    def test_non_coordinator_does_not_clear(self):
-        """Even with empty saved URI, non-coordinator speaker does not clear."""
-        sp = self._run_with_saved_uri(saved_uri="", is_coordinator=False)
+    def test_unplanned_non_coordinator_cleanup_does_not_clear(self):
+        """Internal cleanup without a plan retains its coordinator guard."""
+        sp = _set_standalone(MagicMock())
+        sp.is_coordinator = False
+        snapshot = SimpleNamespace(media_uri='', mute=False,
+                                   restore=MagicMock())
+        failed, interrupt = sonos_say._restore_after_announcement(
+            sp, snapshot, True, None, None, False,
+        )
+        self.assertFalse(failed)
+        self.assertIsNone(interrupt)
         sp.avTransport.SetAVTransportURI.assert_not_called()
 
     def test_stop_called_before_clear_if_playing(self):

@@ -33,9 +33,13 @@ class ConfiguredTestCase(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         # Key/provider failures now follow a valid, read-only preflight.
-        speaker = MagicMock(uid="test-target", ip_address="192.0.2.2",
-                            is_visible=True, is_satellite=False,
-                            has_satellites=False)
+        speaker = MagicMock(uid="test-target", _uid="test-target",
+                            ip_address="192.0.2.2", _is_satellite=False,
+                            _has_satellites=False)
+        speaker.zone_group_state.visible_zones = {speaker}
+        identity = patch('sonos_topology._read_device_uid', return_value='test-target')
+        identity.start()
+        self.addCleanup(identity.stop)
         speaker.zone_group_state.has_subscriptions = False
         speaker.zone_group_state.processed_count = 0
         speaker.group = SimpleNamespace(coordinator=speaker, members=[speaker])

@@ -109,18 +109,21 @@ no join/unjoin or bond configuration calls are made for this layout. Bonded room
 with another logical room, direct satellite/hidden targets, stereo pairs, unknown
 primary flags, and missing/contradictory ownership remain unsupported.
 
-`TopologyPlan` retains raw member identities for ordinary regrouping, plus frozen
-role observations, the selected room's member identities, and satellite-parent
-links. SoCo 0.31.2 exposes parsed satellite ownership only through private
-`_satellite_parent`; that access is isolated and covered by real-parser subprocess
-contracts. Primary-only `has_satellites` flags on satellites do not establish
-ownership. Room names and visibility alone never prove a bond.
+`TopologyPlan` retains raw member UID sets for ordinary regrouping, frozen role
+observations including parent UIDs, and the selected room's member UID set. It
+stores neither mutable member objects nor redundant satellite-parent sets.
+SoCo 0.31.2 parsed roles use private `_uid`, `_is_satellite`, `_has_satellites`,
+and `_satellite_parent`, plus the processed state's visibility set. That access
+is isolated and covered by real-parser subprocess contracts. Primary-only
+`has_satellites` flags on satellites do not establish ownership. Room names and
+visibility alone never prove a bond.
 
 Each independent inspection clears `zone_group_state`'s five-second polling
 cache before reading the group. Eligibility uses copied roles from that same
-processed payload. Public SoCo role getters can poll again: a changed
-`processed_count` during observation, or unavailable observation identity, fails
-closed rather than mixing old membership with new roles. This refreshes
+processed payload without public role getters, which can poll individual
+satellites and introduce new observations. No surround/sub needs to answer a
+separate role request. A changed `processed_count` during copying, or unavailable
+observation identity, still fails closed. This refreshes
 initial/pre-unjoin/pre-snapshot/pre-playback checks and every convergence
 sample, including coordinator-side restoration checks. Cache-clear/read failures
 fail closed. Active topology subscriptions bypass polling even after invalidation
@@ -136,18 +139,36 @@ accepts an already exact original coordinator/member set without a join RPC.
 Otherwise it joins only from the expected isolated-target/original-group-minus-
 target state. Convergence polls every 0.5 seconds for at most five seconds, always
 invalidating the cache and sleeping no longer than the remaining deadline.
-Concurrent changes fail closed rather than joining a different group.
-Sonos provides no atomic lock against other controllers changing topology during
-playback; the pre-playback check cannot eliminate that race.
+Unavailable target/coordinator observations retry within the recovery deadline;
+post-join convergence uses its remaining time rather than starting a new budget.
+Observed unrelated topology fails immediately without joining. Sonos provides
+no atomic lock against other controllers changing topology during playback;
+fresh checks cannot eliminate the race between verification and a write.
 
-Bonded cleanup freshly verifies the captured logical room and parent links before
-`Snapshot.restore(fade=False)` and again after restoration. If topology is unsafe
-or unavailable, it skips transport restoration and empty-URI clearing, attempts
-independent target-local mute/volume recovery only on the same identity, and
-reports `SONOS_RESTORE_FAILED`. It does not repair bonds or join a changed group.
-Empty-URI clearing has its own fresh room check. A pre-mutation bonded refusal
-skips restoration altogether; state recovery is armed immediately before the first
-rendering RPC because that call may apply a change and then fail.
+Cleanup freshly verifies exact isolated membership and satellite ownership for
+**every target**, including standalone and detached ordinary speakers, before
+`Snapshot.restore(fade=False)` and again after restoration. The post-restore
+sample also guards empty-URI clearing; no third topology sample or public
+coordinator lookup is needed for a captured plan. Unavailable observations retry
+every 0.5 seconds for at most five seconds per check. Known unsafe topology is
+never retried into acceptance, and mutating RPCs are never replayed. If topology
+is unsafe or remains unavailable, cleanup skips transport writes, attempts safe
+independent target-local mute/volume recovery, and reports `SONOS_RESTORE_FAILED`.
+It does not repair bonds or join an unrelated group.
+
+Rendering safety requires the UDN from a fresh direct request to the target IP's
+`/xml/device_description.xml` on port 1400. SoCo's `uid` and even
+`get_speaker_info(refresh=True)` reuse the cached UID and cannot authorize writes
+at a reassigned IP. Identity reads have a five-second socket timeout, a 64 KiB
+body limit, strict UDN parsing, and no redirect/proxy following. Failed or changed
+identity prohibits writes. After failed/skipped snapshot restoration or an unsafe
+post-check, fallback obtains fresh identity proof again. A successful snapshot
+already restores mute; cleanup does not redundantly set it again.
+
+A pre-mutation refusal skips transport/rendering restoration for every layout;
+an attempted unjoin still receives regroup-only recovery. State recovery is armed
+immediately before the first rendering RPC because it may apply a change and then
+fail.
 
 Safe cleanup calls `Snapshot.restore(fade=False)` before explicitly restoring
 volume. An empty saved URI is cleared on idle standalone/bonded targets, not detached
