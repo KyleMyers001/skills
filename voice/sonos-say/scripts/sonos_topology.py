@@ -97,8 +97,10 @@ def soco_deadline(speaker: Any, deadline: float):
 class _Deadline:
     """One check's retry budget. Sleeps are never longer than time left."""
 
-    def __init__(self, timeout: float):
+    def __init__(self, timeout: float, *, deadline: Optional[float] = None):
         self.deadline = time.monotonic() + timeout
+        if deadline is not None:
+            self.deadline = min(self.deadline, deadline)
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
@@ -142,20 +144,23 @@ def _poll(
     wait_if_rejected: bool = False,
     retry_structural: bool = False,
     rejected: str = "topology did not converge",
+    deadline: Optional[float] = None,
 ):
     """Retry unavailable reads; retry structural read errors only on request.
 
     Mid-transition samples after a group change may be structurally
-    incomplete. Errors raised by ``accept`` always propagate.
+    incomplete. Errors raised by ``accept`` always propagate. The enclosing
+    absolute deadline caps requests and sleeps, including single observations.
     """
     retryable = TopologyError if retry_structural else TopologyUnavailable
-    deadline = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT)
+    budget = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT,
+                       deadline=deadline)
     while True:
         last_error: Optional[BaseException] = None
         try:
-            call_timeout = deadline.request_timeout()
+            call_timeout = budget.request_timeout()
             observed = read(call_timeout)
-            deadline.request_timeout()  # Late success is not evidence.
+            budget.request_timeout()  # Late success is not evidence.
         except retryable as exc:
             last_error = exc
         else:
@@ -163,7 +168,7 @@ def _poll(
                 return observed
             if not wait_if_rejected:
                 raise TopologyError(rejected)
-        if timeout <= 0 or not deadline.pause():
+        if timeout <= 0 or not budget.pause():
             if (isinstance(last_error, TopologyUnavailable)
                     and not wait_if_rejected):
                 raise last_error
@@ -474,7 +479,7 @@ def verify_target_identity(plan: TopologyPlan, *, deadline: Optional[float] = No
 
 
 def verify_isolated_target(
-    plan: TopologyPlan, timeout: float = 0,
+    plan: TopologyPlan, timeout: float = 0, *, deadline: Optional[float] = None,
 ) -> None:
     """Retry unavailable reads only; observed unsafe rooms fail immediately."""
     def isolated(observed: TopologyPlan) -> bool:
@@ -493,6 +498,7 @@ def verify_isolated_target(
         timeout,
         accept=isolated,
         rejected="target room is not isolated or its bonds changed",
+        deadline=deadline,
     )
 
 
@@ -501,6 +507,7 @@ def _wait_for_topology(
     expected_coordinator_uid: str,
     expected_member_uids: frozenset[str],
     timeout: float,
+    *, deadline: Optional[float] = None,
 ) -> TopologyPlan:
     """Wait boundedly for an exact coordinator and membership view."""
     return _poll(
@@ -513,6 +520,7 @@ def _wait_for_topology(
         wait_if_rejected=True,
         retry_structural=True,
         rejected="exact group topology did not converge",
+        deadline=deadline,
     )
 
 
@@ -553,11 +561,12 @@ def detach_target(
 def restore_target_group(
     plan: TopologyPlan,
     timeout: float = TOPOLOGY_VERIFY_TIMEOUT,
+    *, deadline: Optional[float] = None,
 ) -> None:
     """Rejoin the target to its exact prior coordinator and verify it.
 
     ``timeout`` bounds each phase: the pre-join wait, the join RPC, and the
-    post-join wait.
+    post-join wait. An enclosing absolute ``deadline`` caps all phases.
     """
     if not plan.detach:
         return
@@ -596,10 +605,17 @@ def restore_target_group(
         read, timeout, accept=lambda sample: classify(sample) is not None,
         wait_if_rejected=True, retry_structural=True,
         rejected="recovery topology did not converge",
+        deadline=deadline,
     )
     if classify(observed) == "original":
         return  # RPC may have failed before mutation, or rejoin already completed.
-    with bounded_soco_request(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT):
+    join_budget = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT,
+                           deadline=deadline)
+    join_timeout = join_budget.request_timeout()
+    if deadline is not None and join_timeout < TOPOLOGY_MIN_READ_SECONDS:
+        # The legacy request context rounds up; never extend an absolute cap.
+        raise TopologyUnavailable("target rejoin dispatch budget exhausted")
+    with bounded_soco_request(join_timeout):
         try:
             plan.speaker.join(plan.coordinator)
         except Exception as exc:
@@ -610,6 +626,7 @@ def restore_target_group(
             plan.coordinator_uid,
             plan.member_uids,
             timeout,
+            deadline=deadline,
         )
     except Exception as exc:
         raise TopologyError(

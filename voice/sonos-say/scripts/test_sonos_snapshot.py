@@ -97,7 +97,7 @@ def network(url, *, headers, data, timeout):
 
 real_regroup = say.restore_target_group
 
-def regroup(plan):
+def regroup(plan, **kwargs):
     global phase, layout
     group_attempts.append(now)
     phase = 'group'
@@ -105,7 +105,7 @@ def regroup(plan):
         layout = 'unsafe'
     elif mode == 'already':
         layout = 'original'
-    return real_regroup(plan)
+    return real_regroup(plan, **kwargs)
 
 previous_config = (soco.config.REQUEST_TIMEOUT, soco.config.ZGT_EVENT_FALLBACK)
 with patch.object(topology.time, 'monotonic', side_effect=lambda: now), \
@@ -127,6 +127,9 @@ with patch.object(topology.time, 'monotonic', side_effect=lambda: now), \
     joins = [call for call in calls if call[2] == 'SetAVTransportURI'
              and call[4]['CurrentURI'] == 'x-rincon:coord']
     assert len(joins) == (0 if mode in ('unsafe', 'already') else 1), joins
+    # Check actual SOAP dispatch, not merely entry to restore_target_group.
+    # Fake-clock pre-join reads take 0.02s; allow float rounding, not a new phase.
+    assert all(call[1] <= 30.05 for call in joins), joins
     assert all(call[1] < 30 for call in calls if call[0] == 'local'), calls
     assert failed == (mode != 'healthy'), (mode, failed)
     assert isinstance(interrupt, KeyboardInterrupt) == (mode == 'interrupt')

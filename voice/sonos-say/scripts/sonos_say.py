@@ -816,7 +816,7 @@ def _restore_after_announcement(
         # An attempted unjoin still requires exact group recovery, and only that.
         if topology_mutated:
             regrouped = run(
-                lambda: restore_target_group(topology),
+                lambda: restore_target_group(topology, deadline=deadline),
                 "Could not restore Sonos group",
                 deadline,
             )
@@ -828,7 +828,8 @@ def _restore_after_announcement(
     local_safe = transport_safe = True
     if topology is not None:
         transport_safe = run(
-            lambda: verify_isolated_target(topology, TOPOLOGY_VERIFY_TIMEOUT),
+            lambda: verify_isolated_target(
+                topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
             "Could not verify room for transport restoration",
         )
         restore_failed = not transport_safe
@@ -843,7 +844,8 @@ def _restore_after_announcement(
         restore_failed = restore_failed or not restored
         if topology is not None:
             transport_safe = run(
-                lambda: verify_isolated_target(topology, TOPOLOGY_VERIFY_TIMEOUT),
+                lambda: verify_isolated_target(
+                    topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
                 "Could not verify restored room topology",
             )
             restore_failed = restore_failed or not transport_safe
@@ -892,14 +894,15 @@ def _restore_after_announcement(
         # Recovery was armed at unjoin. Rejoin does not require description;
         # restore_target_group itself refuses an unavailable or foreign room.
         group_restored = run(
-            lambda: restore_target_group(topology),
+            lambda: restore_target_group(topology, deadline=deadline),
             "Could not restore Sonos group",
             deadline,
         )
         restore_failed = restore_failed or not group_restored
     elif topology is not None and transport_safe:
         checked = run(
-            lambda: verify_isolated_target(topology, TOPOLOGY_VERIFY_TIMEOUT),
+            lambda: verify_isolated_target(
+                topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
             "Could not verify room after restoration",
         )
         restore_failed = restore_failed or not checked

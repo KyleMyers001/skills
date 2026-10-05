@@ -2189,7 +2189,7 @@ class TestRestoreVerification(unittest.TestCase):
             )
         self.assertTrue(failed)
         self.assertEqual(writes, [])  # Local steps stop at the reserve.
-        regroup.assert_called_once_with(plan)
+        regroup.assert_called_once_with(plan, deadline=sonos_say.CLEANUP_BUDGET_SECONDS)
 
     def test_cleanup_rpc_caps_soco_timeout(self):
         import soco.config as config

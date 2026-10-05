@@ -149,6 +149,11 @@ fetching a fresh payload and sleeping no longer than the remaining deadline.
 Unavailable target/coordinator observations retry within that pre-join deadline.
 `restore_target_group`'s timeout applies separately to the pre-join wait, the join
 RPC, and post-join convergence, which does not reuse leftover pre-join time.
+During cleanup, the enclosing absolute cleanup deadline also caps every regroup
+phase. Before/after-snapshot and final isolation checks carry the absolute local
+deadline into their poller: both retry requests and sleeps stop at that boundary,
+not merely at service dispatch. An exhausted outer deadline performs no read;
+zero-timeout single-observation behavior remains unchanged when time is available.
 A missing group or role is structural. Isolation checks fail on it immediately;
 post-unjoin, pre-join, and post-join convergence waits retry it within their
 deadline because a group change can briefly publish incomplete samples. Identity

@@ -10,7 +10,121 @@ from unittest.mock import patch
 import test_sonos_say  # Install the suite's offline SoCo stub first.
 import sonos_say as say
 import sonos_topology as topology
-from sonos_test_support import FakeSpeaker, loopback_server
+from sonos_test_support import FakeSpeaker, FakeSnapshot, loopback_server
+
+
+class TestCleanupTopologyReserve(unittest.TestCase):
+    def test_regroup_polls_cannot_extend_cleanup_deadline(self):
+        for state_mutated in (False, True):
+            for phase in ('prejoin', 'postjoin'):
+                with self.subTest(state_mutated=state_mutated, phase=phase):
+                    target, coordinator = FakeSpeaker(), FakeSpeaker('coord')
+                    target.group = coordinator.group = SimpleNamespace(
+                        coordinator=coordinator, members=[coordinator, target])
+                    plan = topology.validate_announcement_target(target)
+                    target.isolate()
+                    now, stalled, requests = [0.0], [False], []
+                    end = say.CLEANUP_BUDGET_SECONDS
+
+                    def dispatch(action, args=None, **kwargs):
+                        if stalled[0]:
+                            requests.append((now[0], kwargs['timeout']))
+                            now[0] += kwargs['timeout']
+                            raise TimeoutError('slow regroup topology')
+                        return {'ZoneGroupState': ''}
+
+                    target.zoneGroupTopology.send_command = dispatch
+                    target.zoneGroupTopology.GetZoneGroupState = lambda args, timeout: (
+                        target.zoneGroupTopology.send_command(
+                            'GetZoneGroupState', args, timeout=timeout))
+
+                    def regroup(*args, **kwargs):
+                        if phase == 'prejoin':
+                            now[0], stalled[0] = end - 1, True
+                        return topology.restore_target_group(*args, **kwargs)
+
+                    def join(coord):
+                        target.regroup(coord)
+                        now[0], stalled[0] = end - 1, True
+
+                    target.join.side_effect = join
+                    with patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
+                            patch.object(topology.time, 'sleep', side_effect=lambda dt:
+                                         now.__setitem__(0, now[0] + dt)), \
+                            patch.object(say, 'restore_target_group', side_effect=regroup):
+                        failed, interrupt = say._restore_after_announcement(
+                            target, None, False, None, plan, True,
+                            state_mutated=state_mutated)
+                    self.assertTrue(failed)
+                    self.assertIsNone(interrupt)
+                    self.assertEqual(requests, [(end - 1, 1)])
+                    self.assertEqual(now[0], end, 'regroup retries exceeded cleanup')
+                    self.assertEqual(target.join.call_count, phase == 'postjoin')
+
+    def test_all_cleanup_topology_polls_obey_enclosing_deadline(self):
+        for check in (1, 2, 3):
+            with self.subTest(check=check):
+                target, coordinator = FakeSpeaker(), FakeSpeaker('coord')
+                grouped = check != 3
+                if grouped:
+                    target.group = coordinator.group = SimpleNamespace(
+                        coordinator=coordinator, members=[coordinator, target])
+                plan = topology.validate_announcement_target(target)
+                if grouped:
+                    target.isolate()
+                snapshot = FakeSnapshot(target)
+                snapshot.snapshot()
+                now, checks, requests, regroup_starts = [0.0], [0], [], []
+                stalled = [False]
+                end = say.CLEANUP_BUDGET_SECONDS
+                local_end = end - say.GROUP_RESTORE_RESERVE_SECONDS if grouped else end
+                verify = topology.verify_isolated_target
+
+                def dispatch(action, args=None, **kwargs):
+                    if stalled[0]:
+                        requests.append((now[0], kwargs['timeout']))
+                        now[0] += kwargs['timeout']
+                        raise TimeoutError('slow topology request')
+                    return {'ZoneGroupState': ''}
+
+                target.zoneGroupTopology.send_command = dispatch
+                target.zoneGroupTopology.GetZoneGroupState = lambda args, timeout: (
+                    target.zoneGroupTopology.send_command(
+                        'GetZoneGroupState', args, timeout=timeout))
+
+                def observe(*args, **kwargs):
+                    checks[0] += 1
+                    if checks[0] == check:
+                        now[0] = local_end - 1
+                        stalled[0] = True
+                    return verify(*args, **kwargs)
+
+                def regroup(*args, **kwargs):
+                    regroup_starts.append(now[0])
+                    stalled[0] = False
+                    return topology.restore_target_group(*args, **kwargs)
+
+                with patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
+                        patch.object(topology.time, 'sleep', side_effect=lambda dt:
+                                     now.__setitem__(0, now[0] + dt)), \
+                        patch.object(say, 'verify_isolated_target', side_effect=observe), \
+                        patch.object(say, 'restore_target_group', side_effect=regroup), \
+                        patch.object(say, 'verify_target_identity') as identity:
+                    failed, interrupt = say._restore_after_announcement(
+                        target, snapshot, True, 19, plan, grouped)
+                self.assertTrue(failed)
+                self.assertIsNone(interrupt)
+                self.assertEqual(checks[0], check)
+                self.assertEqual(requests, [(local_end - 1, 1)])
+                self.assertEqual(now[0], local_end, 'poll retries stole cleanup time')
+                identity.assert_not_called()
+                if grouped:
+                    self.assertEqual(regroup_starts, [local_end])
+                    target.join.assert_called_once_with(coordinator)
+                    self.assertEqual(topology.inspect_topology(target).member_uids,
+                                     plan.member_uids)
+                else:
+                    target.join.assert_not_called()
 
 
 class TestCleanupIdentityBudget(unittest.TestCase):
@@ -20,7 +134,7 @@ class TestCleanupIdentityBudget(unittest.TestCase):
         now = [0.0]
         local_end = say.CLEANUP_BUDGET_SECONDS - say.GROUP_RESTORE_RESERVE_SECONDS
 
-        def unavailable(*args):
+        def unavailable(*args, **kwargs):
             now[0] = local_end - 0.75
             raise topology.TopologyUnavailable()
 
@@ -42,10 +156,35 @@ class TestCleanupIdentityBudget(unittest.TestCase):
         self.assertTrue(failed)
         self.assertIsNone(interrupt)
         self.assertEqual(speaker.volume, 30, 'late identity must not authorize writes')
-        regroup.assert_called_once_with(plan)
+        regroup.assert_called_once_with(plan, deadline=say.CLEANUP_BUDGET_SECONDS)
 
 
 class TestPhaseBudgets(unittest.TestCase):
+    def test_standalone_rejoin_cannot_round_up_remaining_deadline(self):
+        import soco.config as config
+
+        target, coordinator = FakeSpeaker(), FakeSpeaker('coord')
+        target.group = coordinator.group = SimpleNamespace(
+            coordinator=coordinator, members=[coordinator, target])
+        plan = topology.inspect_topology(target)
+        target.isolate()
+        now, timeouts = [0.0], []
+
+        def join(coord):
+            timeouts.append(config.REQUEST_TIMEOUT)
+            now[0] += config.REQUEST_TIMEOUT
+            target.regroup(coord)
+
+        target.join.side_effect = join
+        with patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(config, 'REQUEST_TIMEOUT', 20.0):
+            # Valid pre-join reads are immediate; no outer soco_deadline guard.
+            with self.assertRaises(topology.TopologyError):
+                topology.restore_target_group(plan, deadline=0.2)
+            self.assertEqual(config.REQUEST_TIMEOUT, 20.0)
+        self.assertLessEqual(now[0], 0.2, 'join exceeded the absolute deadline')
+        self.assertTrue(all(timeout <= 0.2 for timeout in timeouts), timeouts)
+
     def test_retry_never_receives_more_than_remaining_phase_budget(self):
         now, calls = [0.0], []
 
