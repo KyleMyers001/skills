@@ -8,6 +8,7 @@ from unittest.mock import patch
 # Existing suite owns its SoCo stub; actual SDK checks run in subprocesses.
 import test_sonos_say
 import sonos_say as say
+import sonos_topology as topology
 from sonos_test_support import (
     FakeSpeaker, FakeSnapshot, TEST_CONFIG, make_bonded_room,
 )
@@ -15,6 +16,7 @@ from sonos_test_support import (
 
 _REAL_WAIT = say.wait_for_playback
 _REAL_EVENTS = say._TransportEvents
+_REAL_READ_DEVICE_UID = topology._read_device_uid
 
 
 class TestAnnouncementLifecycle(unittest.TestCase):
@@ -23,6 +25,9 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, TEST_CONFIG, clear=True))
         self.speaker = FakeSpeaker()
+        self.stack.enter_context(patch.object(
+            topology, '_read_device_uid', side_effect=lambda sp, **kw: sp.device_uid,
+        ))
         self.snapshots = []
         self.key = self.stack.enter_context(patch.object(say, 'get_api_key', return_value='dummy-key'))
         self.stack.enter_context(patch.object(say, 'discover_speaker', side_effect=lambda room: self.speaker))
@@ -72,6 +77,125 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         self.speaker.group.members.append(other)
         other.group = self.speaker.group
         return other
+
+    def test_ordinary_preplayback_drift_without_mutation_never_restores(self):
+        self.recorder_factory.return_value.start.side_effect = self.add_room
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_TOPOLOGY_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.speaker.play_uri.assert_not_called()
+        self.assertEqual(self.speaker.volume, 30)
+        self.assertTrue(self.speaker.mute)
+
+    def test_ordinary_cleanup_regrouping_never_restores_transport(self):
+        for detached in (False, True):
+            with self.subTest(detached=detached):
+                self.speaker = FakeSpeaker()
+                if detached:
+                    self.group()
+                def regroup(*args, **kwargs):
+                    other = self.add_room()
+                    self.speaker.group.coordinator = other
+                    return True
+                self.wait.side_effect = regroup
+                with self.assertRaises(say.SonosSayError) as raised:
+                    say.announce('Hello')
+                self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+                self.assertEqual(self.snapshots[-1].restores, 0)
+                self.assertEqual(self.speaker.volume, 30)
+                self.assertTrue(self.speaker.mute)
+                self.speaker.stop.assert_not_called()
+                self.speaker.avTransport.SetAVTransportURI.assert_not_called()
+                self.speaker.join.assert_not_called()
+
+    def test_detached_read_only_refusal_performs_regroup_only(self):
+        coord = self.group()
+        self.recorder_factory.return_value.start.side_effect = RuntimeError('recorder')
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_PLAYBACK_FAILED')
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.speaker.join.assert_called_once_with(coord)
+        self.speaker.play_uri.assert_not_called()
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+
+    def test_cleanup_retries_transient_pre_and_post_restore_samples(self):
+        for failing_sample in (1, 2):
+            with self.subTest(failing_sample=failing_sample):
+                self.speaker = FakeSpeaker()
+                make_bonded_room(self.speaker)
+                calls = []
+                def clear():
+                    calls.append(True)
+                    if len(calls) == failing_sample:
+                        raise TimeoutError('temporary topology read failure')
+                def finish(*args, **kwargs):
+                    self.speaker.zone_group_state.on_poll = clear
+                    return True
+                self.wait.side_effect = finish
+                with patch.object(topology.time, 'sleep') as sleep:
+                    say.announce('Hello')
+                self.assertEqual(len(calls), 4)
+                sleep.assert_called_once_with(0.5)
+                self.assertEqual(self.snapshots[-1].restores, 1)
+                self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+
+    def test_healthy_cleanup_includes_final_isolation_sample(self):
+        make_bonded_room(self.speaker)
+        self.speaker.uri = ''
+        calls, mute_writes = [], []
+        mute = [True]
+        def finish(*args, **kwargs):
+            self.speaker.zone_group_state.on_poll = lambda: calls.append(True)
+            return True
+        self.wait.side_effect = finish
+        def set_mute(value):
+            mute_writes.append(value)
+            mute[0] = value
+        with patch.object(FakeSpeaker, 'mute', create=True,
+                          new=property(lambda sp: mute[0],
+                                       lambda sp, value: set_mute(value))):
+            say.announce('Hello')
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(mute_writes, [False, True])
+        self.speaker.avTransport.SetAVTransportURI.assert_called_once()
+
+    def test_replacement_after_restore_with_unavailable_topology_skips_local_writes(self):
+        make_bonded_room(self.speaker)
+        restore = FakeSnapshot.restore
+        def unavailable():
+            raise TimeoutError()
+        def changed(snapshot, **kwargs):
+            restore(snapshot, **kwargs)
+            self.speaker.device_uid = 'replacement'
+            self.speaker.volume, self.speaker.mute = 77, False
+            self.speaker.zone_group_state.on_poll = unavailable
+        now = [0.0]
+        with patch.object(FakeSnapshot, 'restore', changed), \
+                patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(topology.time, 'sleep', side_effect=lambda dt: now.__setitem__(0, now[0] + dt)):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (False, 77))
+        self.speaker.avTransport.SetAVTransportURI.assert_not_called()
+
+    def test_topology_and_live_identity_failure_never_write_to_replacement(self):
+        make_bonded_room(self.speaker)
+        def unavailable():
+            raise TimeoutError()
+        def finish(*args, **kwargs):
+            self.speaker.device_uid = 'replacement'
+            self.speaker.zone_group_state.on_poll = unavailable
+            return True
+        self.wait.side_effect = finish
+        with self.assertRaises(say.SonosSayError) as raised:
+            say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.speaker.uid, 'target')  # SDK identity stays cached.
+        self.assertEqual(self.snapshots[0].restores, 0)
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (False, 35))
 
     def test_bonded_drift_during_synthesis_refused_before_snapshot(self):
         make_bonded_room(self.speaker)
@@ -124,7 +248,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
         def fail_cache():
             raise RuntimeError('unavailable')
         def unavailable(*args, **kwargs):
-            self.speaker.zone_group_state.clear_cache = fail_cache
+            self.speaker.zone_group_state.on_poll = fail_cache
             return True
         self.wait.side_effect = unavailable
         with self.assertRaises(say.SonosSayError) as raised:
@@ -137,15 +261,17 @@ class TestAnnouncementLifecycle(unittest.TestCase):
     def test_bonded_changed_identity_does_not_restore_another_device(self):
         make_bonded_room(self.speaker)
         def changed(*args, **kwargs):
-            self.speaker.uid = 'replacement-device'
+            self.speaker._uid = 'replacement-device'
             return True
         self.wait.side_effect = changed
         with self.assertRaises(say.SonosSayError) as raised:
             say.announce('Hello')
         self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
         self.assertEqual(self.snapshots[0].restores, 0)
-        self.assertEqual(self.speaker.volume, 35)
-        self.assertFalse(self.speaker.mute)
+        self.assertEqual(self.speaker.volume, 30)
+        self.assertTrue(self.speaker.mute)
+        self.speaker.join.assert_not_called()
+        self.speaker.avTransport.SetAVTransportURI.assert_not_called()
 
     def test_bonded_restoration_rechecks_parent_links(self):
         primary, satellites = make_bonded_room(self.speaker)
@@ -459,3 +585,205 @@ class TestAnnouncementLifecycle(unittest.TestCase):
             with self.assertRaises(say.SonosSayError) as raised:
                 say.announce('Hello')
         self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+
+    def test_description_timeout_does_not_block_matching_topology(self):
+        coord = self.group()
+        reads = []
+
+        def timeout(speaker):
+            reads.append(speaker)
+            raise TimeoutError('description timed out')
+
+        with patch.object(topology, '_read_device_uid', side_effect=timeout):
+            say.announce('Hello')
+        self.assertEqual(reads, [])
+        self.assertEqual(self.snapshots[-1].restores, 1)
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+        self.speaker.join.assert_called_once_with(coord)
+
+    def test_regroup_only_cleanup_does_not_read_description(self):
+        coord = self.group()
+        self.recorder_factory.return_value.start.side_effect = RuntimeError('recorder')
+        reads = []
+
+        def timeout(speaker):
+            reads.append(speaker)
+            raise TimeoutError('description timed out')
+
+        with patch.object(topology, '_read_device_uid', side_effect=timeout):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_PLAYBACK_FAILED')
+        self.assertEqual(reads, [])
+        self.speaker.join.assert_called_once_with(coord)
+
+    def test_device_uid_change_alone_still_restores_matching_topology(self):
+        coord = self.group()
+
+        def changed(*args, **kwargs):
+            self.speaker.device_uid = 'replacement'
+            return True
+
+        self.wait.side_effect = changed
+        say.announce('Hello')
+        self.assertEqual(self.snapshots[-1].restores, 1)
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+        self.speaker.join.assert_called_once_with(coord)
+
+    def test_unavailable_topology_and_bad_description_writes_nothing(self):
+        for failure in ('timeout', 'mismatch'):
+            with self.subTest(failure=failure):
+                self.speaker = FakeSpeaker()
+                self.group()
+
+                def finish(*args, **kwargs):
+                    def unavailable():
+                        raise TimeoutError('topology')
+                    self.speaker.zone_group_state.on_poll = unavailable
+                    return True
+
+                self.wait.side_effect = finish
+
+                def read(speaker, **kwargs):
+                    if failure == 'timeout':
+                        raise TimeoutError('description')
+                    return 'replacement'
+
+                now = [0.0]
+                with patch.object(topology, '_read_device_uid', side_effect=read), \
+                        patch.object(topology.time, 'monotonic',
+                                     side_effect=lambda: now[0]), \
+                        patch.object(topology.time, 'sleep',
+                                     side_effect=lambda dt: now.__setitem__(0, now[0] + dt)):
+                    with self.assertRaises(say.SonosSayError) as raised:
+                        say.announce('Hello')
+                self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+                self.assertEqual(self.snapshots[-1].restores, 0)
+                self.speaker.join.assert_not_called()
+                self.speaker.avTransport.SetAVTransportURI.assert_not_called()
+                self.assertEqual((self.speaker.mute, self.speaker.volume), (False, 35))
+
+    def test_unavailable_topology_matching_description_is_local_only(self):
+        self.group()
+
+        def finish(*args, **kwargs):
+            self.speaker.zone_group_state.on_poll = (
+                lambda: (_ for _ in ()).throw(TimeoutError('topology'))
+            )
+            return True
+
+        self.wait.side_effect = finish
+        now = [0.0]
+        with patch.object(topology.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(topology.time, 'sleep',
+                             side_effect=lambda dt: now.__setitem__(0, now[0] + dt)):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[-1].restores, 0)
+        self.speaker.join.assert_not_called()
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
+
+    def test_encoded_entity_cannot_authorize_fallback_rendering_writes(self):
+        def unsafe(*args, **kwargs):
+            self.add_room()
+            return True
+
+        self.wait.side_effect = unsafe
+        xml = ('<?xml version="1.0" encoding="utf-16"?>'
+               '<!DOCTYPE root [<!ENTITY identity "target">]>'
+               '<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+               '<UDN>uuid:&identity;</UDN></device></root>').encode('utf-16')
+        with patch.object(topology, '_read_device_uid', _REAL_READ_DEVICE_UID), \
+                patch('http.client.HTTPConnection') as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status, response.read.return_value = 200, xml
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        connection.return_value.request.assert_called_once()
+        self.assertEqual((self.speaker.mute, self.speaker.volume), (False, 35))
+        self.assertEqual(self.snapshots[-1].restores, 0)
+        self.speaker.join.assert_not_called()
+
+    def test_rpc_budget_failure_rejoins_once_and_wins_over_playback_interrupt(self):
+        coord = self.group()
+        self.wait.side_effect = KeyboardInterrupt()
+        now, dispatches = [0.0], []
+
+        def dispatch(action, args, timeout=5):
+            dispatches.append((action, now[0], timeout))
+            duration = min(4.9, timeout)
+            now[0] += duration
+            if duration < 4.9:
+                raise TimeoutError('request timed out')
+
+        self.speaker.avTransport.send_command = dispatch
+
+        def slow_restore(snapshot, **kwargs):
+            snapshot.restores += 1
+            for _ in range(20):
+                snapshot.device.avTransport.send_command('RestorePart', [])
+
+        with patch.object(FakeSnapshot, 'restore', slow_restore), \
+                patch.object(say.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.assertEqual(self.snapshots[-1].restores, 1)
+        self.assertTrue(dispatches)
+        self.assertTrue(all(start < 30 for _, start, _ in dispatches))
+        self.assertLessEqual(now[0], 30)
+        self.speaker.join.assert_called_once_with(coord)
+        self.assertIs(self.speaker.avTransport.send_command, dispatch)
+
+    def test_grouped_after_snapshot_restore_is_not_uri_cleared(self):
+        self.speaker.uri = ''
+        restore = FakeSnapshot.restore
+
+        def regroup(snapshot, **kwargs):
+            restore(snapshot, **kwargs)
+            self.add_room()
+
+        with patch.object(FakeSnapshot, 'restore', regroup):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.speaker.avTransport.SetAVTransportURI.assert_not_called()
+        self.speaker.join.assert_not_called()
+
+    def test_later_regroup_after_post_restore_check_fails_without_join(self):
+        class Tracking(FakeSpeaker):
+            def __init__(self):
+                self._volume = 30
+                self._restoring = False
+                super().__init__()
+
+            @property
+            def volume(self):
+                return self._volume
+
+            @volume.setter
+            def volume(self, value):
+                self._volume = value
+                if (value == 30 and not self._restoring
+                        and getattr(self, 'group', None) is not None):
+                    other = FakeSpeaker('another-room')
+                    other.group = self.group
+                    self.group.members.append(other)
+
+        self.speaker = Tracking()
+        restore = FakeSnapshot.restore
+
+        def wrapped(snapshot, **kwargs):
+            snapshot.device._restoring = True
+            try:
+                restore(snapshot, **kwargs)
+            finally:
+                snapshot.device._restoring = False
+
+        with patch.object(FakeSnapshot, 'restore', wrapped):
+            with self.assertRaises(say.SonosSayError) as raised:
+                say.announce('Hello')
+        self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
+        self.speaker.join.assert_not_called()

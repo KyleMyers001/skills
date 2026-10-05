@@ -19,9 +19,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 soco = types.ModuleType("soco")
 soco.SoCo = MagicMock()
+config = types.ModuleType("soco.config")
+config.REQUEST_TIMEOUT = 20.0
+config.ZGT_EVENT_FALLBACK = True
+soco.config = config
+exceptions = types.ModuleType("soco.exceptions")
+exceptions.SoCoException = type("SoCoException", (Exception,), {})
+soco.exceptions = exceptions
 snap = types.ModuleType("soco.snapshot")
 snap.Snapshot = MagicMock()
 sys.modules["soco"] = soco
+sys.modules["soco.config"] = config
+sys.modules["soco.exceptions"] = exceptions
 sys.modules["soco.snapshot"] = snap
 import sonos_say as say
 phase, signame, root, failure = sys.argv[1:]
@@ -32,8 +41,11 @@ restoring = False
 mute_state, volume_state = [True], [30]
 target, coord = MagicMock(), MagicMock()
 for uid, sp in (("target", target), ("coord", coord)):
-    sp.uid, sp.is_visible = uid, True
-    sp.is_satellite, sp.has_satellites = False, False
+    for service in ('avTransport', 'renderingControl', 'zoneGroupTopology',
+                    'deviceProperties'):
+        getattr(sp, service).send_command = MagicMock()
+    sp.uid = sp._uid = uid
+    sp._is_satellite, sp._has_satellites = False, False
     sp.zone_group_state.has_subscriptions = False
     sp.zone_group_state.processed_count = 0
     sp.volume, sp.ip_address, sp.mute = 30, "192.0.2.2", False
@@ -56,6 +68,7 @@ def group(coordinator, members):
     view = types.SimpleNamespace(coordinator=coordinator, members=members)
     for member in members:
         member.group = view
+        member.zone_group_state.visible_zones = set(members)
 
 group(coord, [coord, target])
 def interrupt(at):
@@ -121,7 +134,8 @@ class Temporary(tempfile.TemporaryDirectory):
         return super().__exit__(*args)
 
 outcome = 0
-with patch("sonos_say.discover_speaker", discover), \
+with patch("sonos_topology._read_device_uid", side_effect=lambda sp, **kw: sp._uid), \
+     patch("sonos_say.discover_speaker", discover), \
      patch("sonos_say.validate_announcement_target", validation), \
      patch("sonos_say.get_api_key", return_value="dummy-key"), \
      patch("sonos_say.local_ip_toward", return_value="192.0.2.1"), \

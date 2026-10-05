@@ -81,8 +81,10 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   direct satellite/hidden targets, stereo pairs, and unknown topology are refused.
 - Read-only discovery and fresh topology validation precede Keychain lookup
   (bounded to 10 seconds) and synthesis. Synthesis finishes before any group
-  mutation. Independent safety observations invalidate SoCo's polling cache;
-  active topology subscriptions are unsupported and fail closed. Device roles
+  mutation. Each safety observation fetches a fresh zone-group payload directly;
+  active topology subscriptions are unsupported and fail closed. Households that
+  answer that request with 501 (SoCo notes about 20+ players) are unsupported
+  and fail immediately; no topology-event fallback is used. Device roles
   must come from the same processed observation. Exact room membership and
   satellite ownership are rechecked before snapshot and playback; concurrent
   controllers remain a risk.
@@ -101,11 +103,34 @@ limits across blocking SoCo calls. `--help` requires no configuration.
   pausing, non-start, and timeout cannot prove success.
 - After snapshot, the target is temporarily unmuted for delivery. Original mute
   and volume must be restored and read back; mismatches are restoration failures.
-  Bonded cleanup verifies the same room and bonds before transport restoration and
-  afterward. Unsafe topology prevents transport/group writes, but independent
-  primary-local mute/volume recovery is attempted if its identity still matches.
-  No automatic bond repair or regrouping is made. A bonded refusal before the
-  first state-changing RPC incurs no restoration writes.
+  Transport restoration requires a fresh topology poll whose UUID matches the
+  captured target. Do not fetch device-description before a topology-backed
+  restore or rejoin. Fetch it only to authorize local mute and volume when
+  topology is unavailable or unsafe; a mismatch or failed read skips those
+  writes. Reject DOCTYPE/entity declarations before expansion or UDN extraction,
+  including UTF-16 descriptions; do not rely on an ASCII byte scan.
+  A different topology UUID is refused. A cached device-UID change alone is not
+  a transport refusal. Standalone and bonded targets get one more isolation
+  check after the last cleanup write. Do not run that check after a rejoin, and
+  do not repair bonds or regroup an unrelated room.
+- Unavailable topology reads retry for at most five seconds per check.
+  A missing group or role fails isolation checks immediately; post-unjoin,
+  pre-join, and post-join convergence waits retry such mid-transition samples
+  within their deadline. Topology observations use request timeouts between
+  half a second and five seconds; no ZoneGroupTopology subscription is opened.
+  Recovery's pre-join wait, join RPC, and post-join wait each get their own five
+  seconds. Cleanup starts no further step after 45 seconds. A scoped SDK dispatch
+  guard checks time before each target RPC, including Snapshot's internal calls,
+  and caps its timeout at the remaining budget (at most five seconds). Local
+  restoration for a detached member reserves 15 seconds for safe regrouping;
+  it starts no RPC with less than half a second left. Exhaustion is a restore
+  failure even if regrouping succeeds. Socket timeouts are not total wall-clock
+  limits: an in-flight trickling SOAP response can still overrun this budget.
+  Live identity reads separately end after five seconds in total, even if the
+  device trickles its response. Unsafe topology
+  is never retried into acceptance, and mutating RPCs are never replayed.
+  Refusal before the first state-changing RPC incurs no restoration writes; an
+  attempted unjoin still requires regroup-only recovery.
 - Scoped SIGINT/SIGTERM handling covers live preflight through temporary-file
   deletion. Cleanup attempts captured transport, URI, volume, and group
   restoration; group recovery is armed only at a validated unjoin RPC attempt.

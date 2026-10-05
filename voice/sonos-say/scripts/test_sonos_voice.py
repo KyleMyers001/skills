@@ -16,9 +16,18 @@ from types import SimpleNamespace
 _soco = types.ModuleType("soco")
 _soco.SoCo = MagicMock()
 _soco.discover = MagicMock(return_value=[])
+_config = types.ModuleType("soco.config")
+_config.REQUEST_TIMEOUT = 20.0
+_config.ZGT_EVENT_FALLBACK = True
+_soco.config = _config
+_exceptions = types.ModuleType("soco.exceptions")
+_exceptions.SoCoException = type("SoCoException", (Exception,), {})
+_soco.exceptions = _exceptions
 _snapshot = types.ModuleType("soco.snapshot")
 _snapshot.Snapshot = MagicMock()
 sys.modules.setdefault("soco", _soco)
+sys.modules.setdefault("soco.config", _config)
+sys.modules.setdefault("soco.exceptions", _exceptions)
 sys.modules.setdefault("soco.snapshot", _snapshot)
 
 import sonos_say  # noqa: E402
@@ -33,9 +42,13 @@ class ConfiguredTestCase(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         # Key/provider failures now follow a valid, read-only preflight.
-        speaker = MagicMock(uid="test-target", ip_address="192.0.2.2",
-                            is_visible=True, is_satellite=False,
-                            has_satellites=False)
+        speaker = MagicMock(uid="test-target", _uid="test-target",
+                            ip_address="192.0.2.2", _is_satellite=False,
+                            _has_satellites=False)
+        speaker.zone_group_state.visible_zones = {speaker}
+        identity = patch('sonos_topology._read_device_uid', return_value='test-target')
+        identity.start()
+        self.addCleanup(identity.stop)
         speaker.zone_group_state.has_subscriptions = False
         speaker.zone_group_state.processed_count = 0
         speaker.group = SimpleNamespace(coordinator=speaker, members=[speaker])
