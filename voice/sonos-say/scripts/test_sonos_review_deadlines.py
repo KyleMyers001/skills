@@ -199,7 +199,7 @@ class TestPhaseBudgets(unittest.TestCase):
                 topology._poll(unavailable, 0.7)
         self.assertEqual(len(calls), 1)
         self.assertAlmostEqual(calls[0], 0.7)
-        self.assertEqual(now[0], 0.5)  # No useful read fits the remaining budget.
+        self.assertEqual(now[0], 0.0)  # No sleep when the next read cannot fit.
 
     def test_late_prejoin_sample_cannot_authorize_join(self):
         target, coordinator = FakeSpeaker(), FakeSpeaker('coord')

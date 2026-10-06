@@ -154,16 +154,24 @@ phase. Before/after-snapshot and final isolation checks carry the absolute local
 deadline into their poller: both retry requests and sleeps stop at that boundary,
 not merely at service dispatch. An exhausted outer deadline performs no read;
 zero-timeout single-observation behavior remains unchanged when time is available.
-A missing group view is `TopologyIncomplete`. Isolation checks fail on it
-immediately; post-unjoin, pre-join, and post-join convergence waits may retry it
-because a group change can briefly omit the target from the published groups.
+A missing group or parser-produced `coordinator=None` is `TopologyIncomplete`.
+Isolation checks fail on it immediately; post-unjoin, pre-join, and post-join
+convergence waits may retry it because a group change can briefly omit a member
+from the published groups. Missing identity never authorizes a mutation.
 Malformed roles/XML, unsupported polling (including UPnP/HTTP 501), active
 subscriptions, SDK protocol errors (including UPnP 401/402), and arbitrary runtime
-errors fail immediately, even in convergence waits. Only explicit connection/reset/
-timeout exception types are temporary; neither `OSError` nor `SoCoException` is
-blanket-retryable. Identity changes and unrelated topology also fail immediately.
+errors fail immediately, even in convergence waits. Explicit connection/reset/
+timeout errors, truncated chunked responses, and HTTP 502/503/504 are temporary
+read failures; neither `OSError` nor `SoCoException` is blanket-retryable. Builtin
+and Requests connection errors are distinct; `socket.timeout` is handled explicitly
+for Python 3.9. Identity changes and unrelated topology also fail immediately.
 Each new read needs at least half a second remaining: skip the read below that
-threshold, never round its timeout beyond the deadline. An on-time response can
+threshold, never round its timeout beyond the deadline. Positive timeouts below
+0.5 seconds perform no read; zero requests one default-bounded observation, still
+capped by any outer deadline. Skip a retry sleep unless both the sleep and the
+minimum next-read budget fit. Keep the last observation failure when scheduling
+consumes that next-read budget, rather than replacing it with budget exhaustion.
+An on-time response can
 still succeed with less than half a second left. Each dispatched read passes the
 remaining check time as its request timeout, capped at five seconds. Sequential
 target/coordinator reads share the pre-join budget; household lookup and topology
@@ -177,11 +185,15 @@ fresh checks cannot eliminate the race between verification and a write.
 
 Cleanup freshly verifies exact isolated membership and satellite ownership for
 **every target**, including standalone and detached ordinary speakers, before
-restoration. Detached members restore only local rendering via Snapshot's member
-path (temporarily suppressing its captured coordinator flag, restoring the flag
-on every exit). This preserves mute, volume, EQ and fixed-volume handling without
-transport reads, source replacement, pause/play/stop, or queue seeking before
-rejoin. Exact group recovery provides its own fresh checks. Standalone/bonded
+restoration. A safely isolated detached member first receives one bounded Stop:
+closing the temporary HTTP server does not stop audio already buffered by the
+speaker, and exact rejoin can fail. Stop precedes restoring the original mute and
+volume. Unsafe topology authorizes no transport write, including Stop. Detached
+members then restore only local rendering via Snapshot's member path (temporarily
+suppressing its captured coordinator flag, restoring the flag on every exit).
+This preserves mute, volume, EQ and fixed-volume handling without restoring an
+obsolete isolated source or queue before rejoin. Exact group recovery provides
+its own fresh checks. Standalone/bonded
 targets use full `Snapshot.restore(fade=False)` and verify topology again afterward. The post-restore
 sample guards empty-URI clearing. Standalone and bonded targets then get one more
 isolation check after the last cleanup write. Do not run that check after a
@@ -275,33 +287,26 @@ snapshot restoration run once, without interrupt-driven replay.
 A failed pre-unjoin validation incurs no recovery obligation or group RPC;
 a validated unjoin attempt does, even if it mutates the device then times out.
 
-### Cleanup follow-up design boundaries
+### Cleanup design boundaries
 
-- **General implicit service metadata (#5), deferred:** only the known
+- **General implicit service metadata, deferred:** only the known
   `GetZoneGroupState`/`GetHouseholdID` zero-argument calls receive explicit `[]`.
   Arbitrary future `send_command(action, args=None)` calls can still make SoCo
   fetch service descriptions under its fixed 10-second timeout. A generic args
   substitution would be unsafe for actions with required arguments. Audit new
   SDK call paths; a general metadata policy requires separate design/tests.
-- **Hard SOAP deadlines (#11), deferred:** per-RPC timeouts and boundary checks
+- **Hard SOAP deadlines, deferred:** per-RPC timeouts and boundary checks
   are soft limits, not cancellation of a trickling in-flight SOAP response.
   Never move mutating RPCs to an abandoned worker to claim a hard deadline.
   Hard cancellation needs a design that establishes whether a mutation applied
   and prevents late writes. The existing read-only identity cancellation,
   retained-socket shutdown and worker join remain intact; these security
   protections must not be removed as a simplification.
-- **Final isolation check (#7), retained:** it is not redundant in the current
+- **Final isolation check, retained:** it is not redundant in the current
   ordering. Explicit volume recovery occurs after the post-Snapshot sample;
   another controller can regroup during that interval, and URI clearing can
-  also mutate transport. Removing the final sample failed the existing
-  `test_later_regroup_after_post_restore_check_fails_without_join` contract.
-  Keep verification after these writes and never run it after exact rejoin.
-
-All follow-up verification is offline (real SoCo 0.31.2 subprocess contracts,
-mocked SOAP and loopback identity servers). It does not authorize LAN playback or
-establish hardware acceptance. `soco-zgs-cache-gotcha.md` was not present anywhere
-inside this checkout (including hidden directories); no profile or external
-memory copy was read or modified.
+  also mutate transport. Keep verification after these writes and never run it
+  after exact rejoin.
 
 ## Completion and error contract
 
@@ -339,7 +344,7 @@ TV/HDMI source restoration need separately approved live acceptance. Real SDK
 parser and synthetic TV-source Snapshot contracts establish software behavior,
 not firmware compatibility or audible playback.
 
-Findings 8 and 10 remain hardware-gated: idle empty-URI clearing and real short-clip
+Idle empty-URI clearing and real short-clip
 AVTransport delivery need separately approved firmware and callback/firewall checks.
 A rejected clear remains a restoration failure.
 Loopback SDK, dummy-decoder, and mocked speaker evidence do not prove audible

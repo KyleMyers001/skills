@@ -152,10 +152,10 @@ class _Deadline:
 
     def pause(self) -> bool:
         remaining = self.remaining()
-        if remaining <= 0:
+        if remaining < TOPOLOGY_POLL_SECONDS + TOPOLOGY_MIN_READ_SECONDS:
             return False
-        time.sleep(min(TOPOLOGY_POLL_SECONDS, remaining))
-        return True
+        time.sleep(TOPOLOGY_POLL_SECONDS)
+        return self.remaining() >= TOPOLOGY_MIN_READ_SECONDS
 
 
 def _unsupported_observation_error(exc: BaseException) -> bool:
@@ -172,10 +172,14 @@ def _temporary_observation_error(exc: BaseException) -> bool:
     SoCo 0.31.2 propagates requests' connection/timeout exceptions directly;
     its SoCoException subclasses describe protocol/role/metadata failures.
     """
-    from requests.exceptions import ConnectionError, Timeout
-    return isinstance(exc, (TimeoutError, ConnectionError, Timeout,
-                            ConnectionResetError, ConnectionAbortedError,
-                            ConnectionRefusedError, BrokenPipeError))
+    from requests.exceptions import (
+        ChunkedEncodingError, ConnectionError as RequestsConnectionError,
+        HTTPError, Timeout,
+    )
+    if isinstance(exc, HTTPError):
+        return getattr(exc.response, "status_code", None) in (502, 503, 504)
+    return isinstance(exc, (TimeoutError, socket.timeout, ConnectionError,
+                            RequestsConnectionError, Timeout, ChunkedEncodingError))
 
 
 def _poll(
@@ -198,25 +202,32 @@ def _poll(
                  if retry_structural else TopologyUnavailable)
     budget = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT,
                        deadline=deadline)
+    last_error: Optional[BaseException] = None
     while True:
-        last_error: Optional[BaseException] = None
         try:
             call_timeout = budget.request_timeout()
+        except TopologyUnavailable as exc:
+            # Scheduling can consume the last useful budget after a pause.
+            # That is not a new observation and must not hide the read failure.
+            if last_error is None:
+                last_error = exc
+            break
+        try:
             observed = read(call_timeout)
             budget.request_timeout(minimum=0)  # Late success is not evidence.
         except retryable as exc:
             last_error = exc
         else:
+            last_error = None
             if accept is None or accept(observed):
                 return observed
             if not wait_if_rejected:
                 raise TopologyError(rejected)
-        if (timeout <= 0 or budget.remaining() < TOPOLOGY_MIN_READ_SECONDS
-                or not budget.pause()):
-            if (isinstance(last_error, TopologyUnavailable)
-                    and not wait_if_rejected):
-                raise last_error
-            raise TopologyError(rejected) from last_error
+        if timeout <= 0 or not budget.pause():
+            break
+    if isinstance(last_error, TopologyUnavailable) and not wait_if_rejected:
+        raise last_error
+    raise TopologyError(rejected) from last_error
 
 
 class TopologyError(RuntimeError):
@@ -321,6 +332,10 @@ def inspect_topology(
                 "topology observation identity is unavailable"
             )
         speaker_uid = _uid(speaker)
+        # SoCo's parser leaves this None when the named coordinator has not
+        # appeared among the published members. Only convergence may retry it.
+        if coordinator is None:
+            raise TopologyIncomplete("group coordinator is missing")
         coordinator_uid = _uid(coordinator)
         member_topology: list[_MemberTopology] = []
         # SoCo 0.31.2 public role getters poll each member's topology state.

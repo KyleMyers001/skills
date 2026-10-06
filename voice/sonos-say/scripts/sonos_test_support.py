@@ -140,6 +140,7 @@ class FakeSnapshot:
         self.device = speaker
         self.restores = 0
         self.transport_restores = 0
+        self.is_coordinator = False
         self.is_playing_queue = False
         self.is_playing_cloud_queue = False
 

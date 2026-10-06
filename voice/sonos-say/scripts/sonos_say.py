@@ -842,6 +842,13 @@ def _restore_after_announcement(
     if not transport_safe:
         authorize_local()
 
+    if topology_mutated and transport_safe:
+        # Closing the HTTP server does not stop already buffered audio. Stop
+        # before restoring the original unmuted volume, even if rejoin fails.
+        # Do not restore the obsolete isolated source before inheriting the group.
+        stopped = run(speaker.stop, "Could not stop temporary playback")
+        restore_failed = restore_failed or not stopped
+
     if snapshot_taken and snapshot is not None and topology_mutated and local_safe:
         # Rejoin inherits the coordinator's transport. Restoring the detached
         # snapshot first is both pointless and potentially unsafe. SoCo 0.31.2's
