@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 TOPOLOGY_POLL_SECONDS = 0.5
 TOPOLOGY_VERIFY_TIMEOUT = 5.0
-# Minimum useful budget for cleanup mutation dispatch (not read-only polling).
+# Minimum useful budget for a new topology read or cleanup mutation dispatch.
 TOPOLOGY_MIN_READ_SECONDS = 0.5
 DEVICE_DESCRIPTION_LIMIT = 64 * 1024
 
@@ -79,9 +79,48 @@ def _service_deadline(service: Any, deadline: float, empty_action: Optional[str]
 
 
 @contextmanager
+def _metadata_free_queue_restore(speaker: Any):
+    """Avoid SoCo 0.31.2's unbounded, unused speaker-info fetch for queues.
+
+    Preserve its coordinator gate and queue/seek/start semantics. The cleanup
+    caller already proved identity from fresh processed topology before entering
+    Snapshot.restore; the guarded role getter also polls if that cache expired.
+    Only the topology UID is needed, not device-description metadata. Do not
+    fetch/parse XML here or poison speaker_info with a partial metadata cache.
+    """
+    missing = object()
+    previous = vars(speaker).get("play_from_queue", missing)
+
+    def play_from_queue(index, start=True):
+        from soco.exceptions import SoCoSlaveException
+        if not speaker.is_coordinator:
+            raise SoCoSlaveException("Queue restore requires a coordinator")
+        uid = _uid(speaker)
+        speaker.avTransport.SetAVTransportURI([
+            ("InstanceID", 0), ("CurrentURI", f"x-rincon-queue:{uid}#0"),
+            ("CurrentURIMetaData", ""),
+        ])
+        speaker.avTransport.Seek([
+            ("InstanceID", 0), ("Unit", "TRACK_NR"), ("Target", index + 1),
+        ])
+        if start:
+            speaker.play()
+
+    speaker.play_from_queue = play_from_queue
+    try:
+        yield
+    finally:
+        if previous is missing:
+            del speaker.play_from_queue
+        else:
+            speaker.play_from_queue = previous
+
+
+@contextmanager
 def soco_deadline(speaker: Any, deadline: float):
     """Stop compound cleanup at RPC boundaries; never leave a mutating worker."""
     with ExitStack() as stack:
+        stack.enter_context(_metadata_free_queue_restore(speaker))
         stack.enter_context(bounded_soco_request(deadline - time.monotonic()))
         for name, empty_action in (
             ("avTransport", None), ("renderingControl", None),
@@ -105,18 +144,18 @@ class _Deadline:
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
 
-    def request_timeout(self) -> float:
+    def request_timeout(self, *, minimum: float = TOPOLOGY_MIN_READ_SECONDS) -> float:
         remaining = self.remaining()
-        if remaining <= 0:
+        if remaining <= 0 or remaining < minimum:
             raise TopologyUnavailable("topology read budget exhausted")
         return min(TOPOLOGY_VERIFY_TIMEOUT, remaining)
 
     def pause(self) -> bool:
         remaining = self.remaining()
-        if remaining <= 0:
+        if remaining < TOPOLOGY_POLL_SECONDS + TOPOLOGY_MIN_READ_SECONDS:
             return False
-        time.sleep(min(TOPOLOGY_POLL_SECONDS, remaining))
-        return True
+        time.sleep(TOPOLOGY_POLL_SECONDS)
+        return self.remaining() >= TOPOLOGY_MIN_READ_SECONDS
 
 
 def _unsupported_observation_error(exc: BaseException) -> bool:
@@ -126,14 +165,21 @@ def _unsupported_observation_error(exc: BaseException) -> bool:
 
 
 def _temporary_observation_error(exc: BaseException) -> bool:
-    """Network stalls may be retried; malformed topology must not."""
-    if isinstance(exc, (TimeoutError, OSError, RuntimeError)):
-        return True
-    try:
-        from soco.exceptions import SoCoException
-    except Exception:
-        return False
-    return isinstance(exc, SoCoException)
+    """Retry transport failures, not SDK programming/protocol/parse errors.
+
+    Requests' RequestException inherits OSError, so do not catch OSError
+    wholesale: HTTPError and InvalidURL are not evidence of a network stall.
+    SoCo 0.31.2 propagates requests' connection/timeout exceptions directly;
+    its SoCoException subclasses describe protocol/role/metadata failures.
+    """
+    from requests.exceptions import (
+        ChunkedEncodingError, ConnectionError as RequestsConnectionError,
+        HTTPError, Timeout,
+    )
+    if isinstance(exc, HTTPError):
+        return getattr(exc.response, "status_code", None) in (502, 503, 504)
+    return isinstance(exc, (TimeoutError, socket.timeout, ConnectionError,
+                            RequestsConnectionError, Timeout, ChunkedEncodingError))
 
 
 def _poll(
@@ -146,37 +192,50 @@ def _poll(
     rejected: str = "topology did not converge",
     deadline: Optional[float] = None,
 ):
-    """Retry unavailable reads; retry structural read errors only on request.
+    """Retry unavailable reads; retry missing-group views only on request.
 
     Mid-transition samples after a group change may be structurally
     incomplete. Errors raised by ``accept`` always propagate. The enclosing
     absolute deadline caps requests and sleeps, including single observations.
     """
-    retryable = TopologyError if retry_structural else TopologyUnavailable
+    retryable = ((TopologyUnavailable, TopologyIncomplete)
+                 if retry_structural else TopologyUnavailable)
     budget = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT,
                        deadline=deadline)
+    last_error: Optional[BaseException] = None
     while True:
-        last_error: Optional[BaseException] = None
         try:
             call_timeout = budget.request_timeout()
+        except TopologyUnavailable as exc:
+            # Scheduling can consume the last useful budget after a pause.
+            # That is not a new observation and must not hide the read failure.
+            if last_error is None:
+                last_error = exc
+            break
+        try:
             observed = read(call_timeout)
-            budget.request_timeout()  # Late success is not evidence.
+            budget.request_timeout(minimum=0)  # Late success is not evidence.
         except retryable as exc:
             last_error = exc
         else:
+            last_error = None
             if accept is None or accept(observed):
                 return observed
             if not wait_if_rejected:
                 raise TopologyError(rejected)
         if timeout <= 0 or not budget.pause():
-            if (isinstance(last_error, TopologyUnavailable)
-                    and not wait_if_rejected):
-                raise last_error
-            raise TopologyError(rejected) from last_error
+            break
+    if isinstance(last_error, TopologyUnavailable) and not wait_if_rejected:
+        raise last_error
+    raise TopologyError(rejected) from last_error
 
 
 class TopologyError(RuntimeError):
     """The target's group topology is unsafe or could not be restored."""
+
+
+class TopologyIncomplete(TopologyError):
+    """A missing group/member view may converge after our group mutation."""
 
 
 class TopologyUnavailable(TopologyError):
@@ -243,7 +302,7 @@ def _fetch_zone_group_state(speaker: Any, deadline: _Deadline) -> Any:
     payload = speaker.zoneGroupTopology.GetZoneGroupState(
         [], timeout=deadline.request_timeout(),
     )["ZoneGroupState"]
-    deadline.request_timeout()  # Never publish a response received too late.
+    deadline.request_timeout(minimum=0)  # Never publish a response received too late.
     state.process_payload(
         payload=payload, source="poll", source_ip=speaker.ip_address,
     )
@@ -261,7 +320,7 @@ def inspect_topology(
         state = _fetch_zone_group_state(speaker, deadline)
         group = speaker.group
         if group is None:
-            raise TopologyError("group topology is missing")
+            raise TopologyIncomplete("group topology is missing")
         try:
             coordinator = group.coordinator
             members = tuple(group.members)
@@ -273,6 +332,10 @@ def inspect_topology(
                 "topology observation identity is unavailable"
             )
         speaker_uid = _uid(speaker)
+        # SoCo's parser leaves this None when the named coordinator has not
+        # appeared among the published members. Only convergence may retry it.
+        if coordinator is None:
+            raise TopologyIncomplete("group coordinator is missing")
         coordinator_uid = _uid(coordinator)
         member_topology: list[_MemberTopology] = []
         # SoCo 0.31.2 public role getters poll each member's topology state.
@@ -300,7 +363,7 @@ def inspect_topology(
         if (state.has_subscriptions is not False
                 or state.processed_count != sample):
             raise TopologyError("topology changed during observation")
-        deadline.request_timeout()
+        deadline.request_timeout(minimum=0)
     except TopologyError:
         raise
     except Exception as exc:
@@ -573,10 +636,10 @@ def restore_target_group(
     expected_without_target = plan.member_uids - {plan.speaker_uid}
 
     def read(call_timeout: float):
-        deadline = _Deadline(call_timeout)
+        read_budget = _Deadline(call_timeout)
         return (
-            inspect_topology(plan.speaker, timeout=deadline.request_timeout()),
-            inspect_topology(plan.coordinator, timeout=deadline.request_timeout()),
+            inspect_topology(plan.speaker, timeout=read_budget.request_timeout()),
+            inspect_topology(plan.coordinator, timeout=read_budget.request_timeout()),
         )
 
     def classify(observed) -> Optional[str]:
@@ -612,9 +675,6 @@ def restore_target_group(
     join_budget = _Deadline(timeout if timeout > 0 else TOPOLOGY_VERIFY_TIMEOUT,
                            deadline=deadline)
     join_timeout = join_budget.request_timeout()
-    if deadline is not None and join_timeout < TOPOLOGY_MIN_READ_SECONDS:
-        # The legacy request context rounds up; never extend an absolute cap.
-        raise TopologyUnavailable("target rejoin dispatch budget exhausted")
     with bounded_soco_request(join_timeout):
         try:
             plan.speaker.join(plan.coordinator)

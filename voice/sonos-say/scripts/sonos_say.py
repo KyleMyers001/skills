@@ -747,13 +747,6 @@ def _bounded_cleanup_step(
     return _run_cleanup_step(bounded, interrupts, warning)
 
 
-def _is_coordinator(speaker: soco.SoCo) -> bool:
-    coordinator = speaker.is_coordinator
-    if not isinstance(coordinator, bool):
-        raise RuntimeError("Coordinator state is unavailable")
-    return coordinator
-
-
 def _clear_temporary_uri(speaker: soco.SoCo) -> None:
     """Clear an announcement URI when the saved transport URI was empty."""
     transport_failed = False
@@ -777,6 +770,16 @@ def _clear_temporary_uri(speaker: soco.SoCo) -> None:
         raise RuntimeError("Could not verify transport before clearing URI")
 
 
+def _restore_local_snapshot(snapshot: Snapshot) -> None:
+    """Use SoCo's member-only restoration path without changing its saved role."""
+    coordinator = snapshot.is_coordinator
+    try:
+        snapshot.is_coordinator = False
+        snapshot.restore(fade=False)
+    finally:
+        snapshot.is_coordinator = coordinator
+
+
 def _restore_after_announcement(
     speaker: soco.SoCo,
     snapshot: Optional[Snapshot],
@@ -787,6 +790,10 @@ def _restore_after_announcement(
     state_mutated: bool = True,
 ) -> tuple[bool, Optional[BaseException]]:
     """Attempt safe restoration once under the caller's cleanup signal guard."""
+    # Preflight can fail before a plan exists, but no mutation can precede plan
+    # validation. Refuse writes if an internal caller violates that invariant.
+    if topology is None:
+        return state_mutated or topology_mutated, None
     interrupts: list[BaseException] = []
     restore_failed = False
     uri_cleared = False
@@ -825,32 +832,47 @@ def _restore_after_announcement(
 
     # A matching topology UUID authorizes transport and local writes. Description
     # is only the fallback when that poll is unavailable or unsafe.
-    local_safe = transport_safe = True
-    if topology is not None:
-        transport_safe = run(
-            lambda: verify_isolated_target(
-                topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
-            "Could not verify room for transport restoration",
-        )
-        restore_failed = not transport_safe
-        if not transport_safe:
-            authorize_local()
+    local_safe = True
+    transport_safe = run(
+        lambda: verify_isolated_target(
+            topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
+        "Could not verify room for transport restoration",
+    )
+    restore_failed = not transport_safe
+    if not transport_safe:
+        authorize_local()
 
-    if snapshot_taken and snapshot is not None and transport_safe:
+    if topology_mutated and transport_safe:
+        # Closing the HTTP server does not stop already buffered audio. Stop
+        # before restoring the original unmuted volume, even if rejoin fails.
+        # Do not restore the obsolete isolated source before inheriting the group.
+        stopped = run(speaker.stop, "Could not stop temporary playback")
+        restore_failed = restore_failed or not stopped
+
+    if snapshot_taken and snapshot is not None and topology_mutated and local_safe:
+        # Rejoin inherits the coordinator's transport. Restoring the detached
+        # snapshot first is both pointless and potentially unsafe. SoCo 0.31.2's
+        # member path preserves mute, EQ and fixed-volume handling without any
+        # coordinator/transport reads, writes, or play/stop calls.
+        restored = run(
+            lambda: _restore_local_snapshot(snapshot),
+            "Could not restore local rendering state",
+        )
+        restore_failed = restore_failed or not restored
+    elif snapshot_taken and snapshot is not None and transport_safe:
         restored = run(
             lambda: snapshot.restore(fade=False),
             "Could not restore transport state",
         )
         restore_failed = restore_failed or not restored
-        if topology is not None:
-            transport_safe = run(
-                lambda: verify_isolated_target(
-                    topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
-                "Could not verify restored room topology",
-            )
-            restore_failed = restore_failed or not transport_safe
-            if not transport_safe:
-                authorize_local()
+        transport_safe = run(
+            lambda: verify_isolated_target(
+                topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
+            "Could not verify restored room topology",
+        )
+        restore_failed = restore_failed or not transport_safe
+        if not transport_safe:
+            authorize_local()
 
     if (snapshot_taken and snapshot is not None
             and not restored and local_safe):
@@ -864,16 +886,6 @@ def _restore_after_announcement(
     if snapshot_taken and snapshot is not None:
         saved_uri = getattr(snapshot, "media_uri", None) or ""
         should_clear = not saved_uri and not topology_mutated and transport_safe
-        if should_clear and topology is None:
-            # Without a captured room plan, only a coordinator owns its URI;
-            # clearing a group member would pull it out of its group.
-            role: list[bool] = []
-            known = run(
-                lambda: role.append(_is_coordinator(speaker)),
-                "Could not read coordinator state before clearing URI",
-            )
-            restore_failed = restore_failed or not known
-            should_clear = role == [True]
         if should_clear:
             uri_cleared = run(
                 lambda: _clear_temporary_uri(speaker),
@@ -899,7 +911,9 @@ def _restore_after_announcement(
             deadline,
         )
         restore_failed = restore_failed or not group_restored
-    elif topology is not None and transport_safe:
+    elif transport_safe:
+        # Keep this sample: local volume recovery since the transport check can
+        # overlap an external regroup; URI clearing is also a transport mutation.
         checked = run(
             lambda: verify_isolated_target(
                 topology, TOPOLOGY_VERIFY_TIMEOUT, deadline=local_deadline),
@@ -1104,14 +1118,10 @@ def announce(
                         recorder.start()
                         log.info("Serving announcement to the target speaker")
                         verify_isolated_target(topology)
-                        try:
-                            _check_supported_sources(topology, isolated=True)
-                        except SonosSayError:
-                            # Source was never replaced: only regroup, never invoke
-                            # Snapshot's unsupported cloud restore/play path.
-                            # state_mutated is still false, so cleanup ignores
-                            # the snapshot and volume flags.
-                            raise
+                        # Refusal before the first write performs regroup only:
+                        # state_mutated is still false, so cleanup ignores the
+                        # snapshot and volume flags, including cloud sources.
+                        _check_supported_sources(topology, isolated=True)
                         # A rendering RPC can apply its change and then fail.
                         state_mutated = True
                         speaker.volume = volume

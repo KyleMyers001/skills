@@ -1880,9 +1880,9 @@ class TestEmptyUriClearing(unittest.TestCase):
         )
         sp.avTransport.SetAVTransportURI.assert_not_called()
 
-    def test_unplanned_non_coordinator_does_not_clear(self):
-        """Without a room plan, a group member's empty URI is left alone."""
-        for coordinator in (False, None):
+    def test_unplanned_cleanup_fails_closed_regardless_of_role(self):
+        """Invalid internal calls cannot use cached roles to authorize writes."""
+        for coordinator in (True, False, None):
             with self.subTest(coordinator=coordinator):
                 sp = _set_standalone(MagicMock())
                 sp.is_coordinator = coordinator
@@ -1890,12 +1890,13 @@ class TestEmptyUriClearing(unittest.TestCase):
                 failed, _ = sonos_say._restore_after_announcement(
                     sp, snapshot, True, 30, None, False,
                 )
-                self.assertIs(failed, coordinator is None)
+                self.assertTrue(failed)
+                snapshot.restore.assert_not_called()
                 sp.stop.assert_not_called()
                 sp.avTransport.SetAVTransportURI.assert_not_called()
 
-    def test_unplanned_nonempty_snapshot_ignores_coordinator_flag(self):
-        """Installed Snapshot callers pass topology=None and a nonempty URI."""
+    def test_planned_nonempty_snapshot_ignores_coordinator_flag(self):
+        """A processed plan, not a separate cached role, authorizes cleanup."""
         sp = _set_standalone(MagicMock())
         type(sp).is_coordinator = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("offline")),
@@ -1904,7 +1905,7 @@ class TestEmptyUriClearing(unittest.TestCase):
             media_uri="prior-uri", mute=False, transport_state="STOPPED",
         )
         failed, interrupt = sonos_say._restore_after_announcement(
-            sp, snapshot, True, 30, None, False,
+            sp, snapshot, True, 30, sonos_say.validate_announcement_target(sp), False,
         )
         self.assertFalse(failed)
         self.assertIsNone(interrupt)

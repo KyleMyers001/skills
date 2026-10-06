@@ -102,7 +102,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
                 with self.assertRaises(say.SonosSayError) as raised:
                     say.announce('Hello')
                 self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
-                self.assertEqual(self.snapshots[-1].restores, 0)
+                self.assertEqual(self.snapshots[-1].transport_restores, 0)
                 self.assertEqual(self.speaker.volume, 30)
                 self.assertTrue(self.speaker.mute)
                 self.speaker.stop.assert_not_called()
@@ -680,7 +680,7 @@ class TestAnnouncementLifecycle(unittest.TestCase):
             with self.assertRaises(say.SonosSayError) as raised:
                 say.announce('Hello')
         self.assertEqual(raised.exception.code, 'SONOS_RESTORE_FAILED')
-        self.assertEqual(self.snapshots[-1].restores, 0)
+        self.assertEqual(self.snapshots[-1].transport_restores, 0)
         self.speaker.join.assert_not_called()
         self.assertEqual((self.speaker.mute, self.speaker.volume), (True, 30))
 

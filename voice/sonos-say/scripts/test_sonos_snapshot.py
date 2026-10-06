@@ -63,7 +63,7 @@ def network(url, *, headers, data, timeout):
         now += min(duration, timeout)
         if duration > timeout:
             raise TimeoutError('bounded SOAP timeout')
-        if mode == 'interrupt' and phase == 'local' and action == 'GetTransportInfo':
+        if mode == 'interrupt' and phase == 'local' and action == 'SetMute':
             raise KeyboardInterrupt()
     result = {}
     if action == 'GetZoneGroupState':
@@ -137,7 +137,9 @@ with patch.object(topology.time, 'monotonic', side_effect=lambda: now), \
         assert layout == 'original'
     if mode == 'healthy':
         assert rendering['Mute'] == '1' and rendering['Volume'] == '30'
-        assert uri == snapshot.media_uri and transport == snapshot.transport_state
+        assert [call[2] for call in calls if call[0] == 'local'].count('Stop') == 1
+        assert not any(call[2] in ('GetTransportInfo', 'Play', 'Pause', 'SetAVTransportURI')
+                       for call in calls if call[0] == 'local'), calls
     assert any(call[2] == 'GetZoneGroupState' for call in calls if call[0] == 'group')
     assert all('send_command' not in vars(service) for service in services)
     assert cached_mute is target.renderingControl.SetMute
@@ -147,6 +149,20 @@ print('snapshot deadline and safe regrouping verified:', mode)
 
 
 class TestInstalledSnapshotContracts(unittest.TestCase):
+    def test_fake_snapshot_initial_coordinator_matches_sdk(self):
+        code = '''
+from soco.snapshot import Snapshot
+from sonos_test_support import FakeSnapshot, FakeSpeaker
+speaker = FakeSpeaker()
+assert FakeSnapshot(speaker).is_coordinator is Snapshot(speaker).is_coordinator is False
+'''
+        result = subprocess.run(
+            [sys.executable, '-B', '-c', code],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent)},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_slow_snapshot_reserves_safe_regrouping_at_actual_rpc_boundaries(self):
         for mode in ('slow', 'unsafe', 'already', 'join-failure', 'interrupt', 'healthy'):
             with self.subTest(mode=mode):
@@ -159,6 +175,109 @@ class TestInstalledSnapshotContracts(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('snapshot deadline and safe regrouping verified',
                               result.stdout)
+
+    def test_interrupted_announce_closes_server_but_still_stops_buffered_audio(self):
+        setup = _DEADLINE_CONTRACT.split('previous_config =')[0].replace(
+            "mode not in ('healthy', 'interrupt')",
+            "mode not in ('healthy', 'interrupt', 'join-failure')",
+        ).replace(
+            "    elif action == 'GetMediaInfo':",
+            "    elif action == 'BecomeCoordinatorOfStandaloneGroup':\n"
+            "        layout = 'isolated'\n"
+            "    elif action == 'GetMediaInfo':",
+        )
+        code = setup + r'''
+import contextlib
+import os
+import socket
+import urllib.request
+from pathlib import Path
+from sonos_test_support import TEST_CONFIG
+# No credential, synthesis, discovery, subscription, or LAN access.
+real_connect = socket.socket.connect
+def loopback_only(sock, address):
+    assert address[0] == '127.0.0.1', address
+    return real_connect(sock, address)
+socket.socket.connect = loopback_only
+rendering['Mute'] = '0'  # Stopping must not depend on restored mute hiding audio.
+paths, closed = [], []
+def synth(text, voice, model, key, path, **kwargs):
+    path.write_bytes(b'offline-audio')
+    paths.append(path)
+real_serve = say.serve_file
+@contextlib.contextmanager
+def serve(path, ip, speaker_ip):
+    global phase
+    try:
+        with real_serve(path, '127.0.0.1', '127.0.0.1') as url:
+            yield url
+    finally:
+        # Server teardown alone is not a transport mutation.
+        closed.append(transport)
+        phase = 'local'
+def interrupted(*args, **kwargs):
+    assert transport == 'PLAYING'
+    with urllib.request.urlopen(uri, timeout=2) as response:
+        assert response.read() == b'offline-audio'
+    raise KeyboardInterrupt()
+with patch.dict(os.environ, {**TEST_CONFIG, 'TMPDIR': os.environ['TMPDIR']}, clear=True), \
+     patch.object(topology.time, 'monotonic', side_effect=lambda: now), \
+     patch.object(soco.services.requests, 'post', side_effect=network), \
+     patch.object(soco.services.requests, 'get', side_effect=AssertionError('unexpected GET')), \
+     patch.object(say, 'discover_speaker', return_value=target), \
+     patch.object(say, 'local_ip_toward', return_value='127.0.0.1'), \
+     patch.object(say, 'get_api_key', return_value='offline'), \
+     patch.object(say, 'synthesise_mp3', side_effect=synth), \
+     patch.object(say, '_TransportEvents') as events, \
+     patch.object(say, 'serve_file', side_effect=serve), \
+     patch.object(say, 'wait_for_playback', side_effect=interrupted), \
+     patch.object(say, 'restore_target_group', side_effect=regroup):
+    try: say.announce('offline test')
+    except say.SonosSayError as error:
+        assert error.code == 'SONOS_RESTORE_FAILED'
+        assert isinstance(error.__cause__, KeyboardInterrupt)
+    else: raise AssertionError('failed rejoin reported success')
+assert closed == ['PLAYING']
+assert transport == 'STOPPED', transport
+assert rendering == {'Volume': '30', 'Mute': '0', 'Bass': '0', 'Treble': '0', 'Loudness': '1'}
+assert all(not path.exists() for path in paths)
+events.return_value.close.assert_called_once()
+local = [c[2] for c in calls if c[0] == 'local']
+assert local.count('Stop') == 1 and local.index('Stop') < local.index('SetMute')
+assert not any(action in local for action in ('SetAVTransportURI', 'Play', 'Pause', 'Seek'))
+assert len(group_attempts) == 1
+'''
+        result = subprocess.run(
+            [sys.executable, '-B', '-c', code, 'join-failure'],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent),
+                 'TMPDIR': os.environ['TMPDIR']},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_detached_interruption_stops_playback_when_rejoin_fails(self):
+        # Playback interruption/server closure does not stop buffered speaker audio.
+        # Use real Snapshot + SOAP dispatch, with a failed exact-group rejoin.
+        code = _DEADLINE_CONTRACT.replace(
+            "mode not in ('healthy', 'interrupt')",
+            "mode not in ('healthy', 'interrupt', 'join-failure')",
+        ).replace(
+            "    assert group_attempts,",
+            "    assert transport == 'STOPPED', (transport, calls)\n"
+            "    assert rendering['Mute'] == '1' and rendering['Volume'] == '30'\n"
+            "    assert rendering['Bass'] == '0' and rendering['Treble'] == '0'\n"
+            "    assert snapshot.is_coordinator is True\n"
+            "    assert not any(c[2] in ('Play', 'Pause', 'Seek') for c in calls if c[0] == 'local')\n"
+            "    assert not any(c[2] == 'SetAVTransportURI' for c in calls if c[0] == 'local')\n"
+            "    assert group_attempts,",
+        )
+        result = subprocess.run(
+            [sys.executable, '-c', code, 'join-failure'],
+            env={'PATH': os.defpath, 'PYTHONPATH': str(Path(__file__).parent),
+                 'PYTHONDONTWRITEBYTECODE': '1'},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_bonded_primary_tv_and_empty_sources_with_real_sdk(self):
         code = r'''
@@ -241,11 +360,23 @@ class Device:
     def stop(self): self.state = 'STOPPED'
     def play(self): self.state = 'PLAYING'
 for uri in ('x-rincon-queue:target#0', 'http://example.invalid/radio', 'x-file-cifs://example.invalid/file'):
-    device = Device(uri)
+    from unittest.mock import patch
+    from sonos_test_support import FakeSpeaker
+    device = FakeSpeaker('target')
+    device.uri, device.state = uri, 'PLAYING'
+    device.bass, device.treble, device.loudness = 0, 0, True
+    device.play_mode, device.cross_fade = 'NORMAL', False
+    device.get_current_track_info = lambda: {'playlist_position': '2', 'position': ''}
+    device.seek = lambda position: None
+    device.pause = lambda: setattr(device, 'state', 'PAUSED_PLAYBACK')
+    device.play = lambda: setattr(device, 'state', 'PLAYING')
+    device.avTransport.Seek = lambda args: setattr(device, 'position', dict(args)['Target'])
+    plan = say.validate_announcement_target(device)
     snapshot = Snapshot(device); snapshot.snapshot()
     device.play_uri('http://example.invalid/announcement')
     device.mute = False; device.volume = 35
-    failed, interrupt = say._restore_after_announcement(device, snapshot, True, 30, None, False)
+    with patch('sonos_topology._read_device_uid', return_value='target'):
+        failed, interrupt = say._restore_after_announcement(device, snapshot, True, 30, plan, False)
     assert not failed and interrupt is None
     assert device.uri == uri and device.state == 'PLAYING' and device.mute and device.volume == 30
     if '#0' in uri: assert device.position == 2

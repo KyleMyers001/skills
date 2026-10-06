@@ -210,7 +210,7 @@ class TestTopologyLifecycle(unittest.TestCase):
             "sonos_topology.time.sleep",
             side_effect=lambda delay: _isolate(target, coordinator),
         ) as sleep:
-            topology.detach_target(plan, timeout=1)
+            topology.detach_target(plan, timeout=2)
 
         sleep.assert_called_once_with(topology.TOPOLOGY_POLL_SECONDS)
 
@@ -242,7 +242,7 @@ class TestTopologyLifecycle(unittest.TestCase):
             "sonos_topology.time.sleep",
             side_effect=_converge,
         ) as sleep:
-            topology.restore_target_group(plan, timeout=1)
+            topology.restore_target_group(plan, timeout=2)
 
         sleep.assert_called_once_with(topology.TOPOLOGY_POLL_SECONDS)
         target.join.assert_called_once_with(coordinator)
@@ -884,7 +884,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                           side_effect=topology.TopologyUnavailable()):
             with self.assertRaises(topology.TopologyError):
                 topology.verify_isolated_target(plan, timeout=0.7)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.0)  # Skip sleep when no next read can fit.
         self.target.group.members.append(self.coord)
         self.sleep.reset_mock()
         with self.assertRaises(topology.TopologyError):
@@ -926,7 +926,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                           side_effect=topology.TopologyUnavailable()):
             with self.assertRaises(topology.TopologyError):
                 topology.restore_target_group(plan, timeout=0.7)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.0)  # Skip sleep when no next read can fit.
         self.target.join.assert_not_called()
 
     def test_post_join_keeps_its_own_five_seconds(self):
@@ -943,7 +943,7 @@ class TestTopologyReadRetries(unittest.TestCase):
             with self.assertRaises(topology.TopologyError):
                 topology.restore_target_group(plan, timeout=5)
         self.target.join.assert_called_once()
-        self.assertGreaterEqual(self.now, 9.5)
+        self.assertEqual(self.now, 9.0)  # Each wait skips its unusable final sleep.
         self.assertLess(self.now, 10.5)
 
     def test_isolation_check_fails_structural_errors_without_retry(self):
@@ -955,11 +955,8 @@ class TestTopologyReadRetries(unittest.TestCase):
         self.sleep.assert_not_called()
 
     def test_convergence_waits_retry_mid_transition_samples(self):
-        missing = SimpleNamespace(_uid='target', _has_satellites=False)
         settled = self.target.group
-        self.target.group = SimpleNamespace(
-            coordinator=self.target, members=[missing],
-        )
+        self.target.group = None  # Valid parser objects, incomplete group view.
 
         def settle(seconds):
             self.advance(seconds)
@@ -978,7 +975,7 @@ class TestTopologyReadRetries(unittest.TestCase):
         with self.assertRaises(topology.TopologyError) as raised:
             topology.restore_target_group(grouped, timeout=0.7)
         self.assertNotIsInstance(raised.exception, topology.TopologyUnavailable)
-        self.assertEqual(self.now, 0.7)
+        self.assertEqual(self.now, 0.0)  # Skip sleep when no next read can fit.
         grouped.speaker.join.assert_not_called()
 
     def test_final_retry_starts_before_deadline_with_remaining_timeout(self):
@@ -993,7 +990,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                 topology._wait_for_topology(
                     self.target, 'target', frozenset({'target'}), 5,
                 )
-        self.assertEqual(self.now, 5)
+        self.assertEqual(self.now, 4.5)
         self.assertEqual(len(seen), 10)
         self.assertEqual(min(seen), topology.TOPOLOGY_MIN_READ_SECONDS)
         self.assertEqual(max(seen), topology.TOPOLOGY_VERIFY_TIMEOUT)
@@ -1004,16 +1001,15 @@ class TestTopologyReadRetries(unittest.TestCase):
         with self.assertRaises(topology.TopologyError):
             topology.restore_target_group(plan, timeout=1)
         self.target.join.assert_called_once()
-        self.assertEqual(self.now, 1)
+        self.assertEqual(self.now, 0.5)
 
     def test_temporary_read_errors_retry_until_the_check_deadline(self):
         import soco.exceptions
         plan = topology.validate_announcement_target(self.target)
         errors = (
             TimeoutError('stall'),
-            OSError('reset'),
-            RuntimeError('unavailable'),
-            soco.exceptions.SoCoException('upnp'),
+            ConnectionResetError('reset'),
+            ConnectionRefusedError('offline'),
         )
         for error in errors:
             with self.subTest(error=type(error).__name__):
@@ -1026,7 +1022,7 @@ class TestTopologyReadRetries(unittest.TestCase):
                 self.target.zone_group_state.on_poll = fail
                 with self.assertRaises(topology.TopologyUnavailable):
                     topology.verify_isolated_target(plan, timeout=0.7)
-                self.assertEqual(self.now, 0.7)
+                self.assertEqual(self.now, 0.0)  # Skip sleep when no next read can fit.
 
     def test_unsupported_zone_group_state_fails_without_retry(self):
         class HTTPError(OSError):  # requests.HTTPError's shape
@@ -1099,13 +1095,14 @@ class TestIdempotentTopology(unittest.TestCase):
     def test_wait_cycles_are_half_second_and_deadline_bounded(self):
         with self.assertRaises(topology.TopologyError):
             topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 5)
-        self.assertEqual(self.h.now, 5)
+        self.assertEqual(self.h.now, 4.5)
         self.assertEqual(self.h.samples, 11)  # plan plus ten samples before expiry
         self.assertEqual(topology.TOPOLOGY_POLL_SECONDS, 0.5)
         self.h.now = 0
         with self.assertRaises(topology.TopologyError):
             topology._wait_for_topology(self.target, 'target', frozenset({'target'}), 0.2)
-        self.assertEqual(self.h.now, 0.2)
+        self.assertEqual(self.h.now, 0)
+        self.assertEqual(self.h.samples, 11)  # No subminimum observation.
 
     def test_unrelated_target_group_is_not_rejoined(self):
         other = _CachedSpeaker('other', self.h)
