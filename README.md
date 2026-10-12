@@ -29,6 +29,7 @@ requirements before using it elsewhere.
 | [planning](planning/SKILL.md) | Create grounded implementation plans. |
 | [report](report/SKILL.md) | Write an Obsidian report for substantial work or on request. |
 | [skill-authoring](skill-authoring/SKILL.md) | Create and refine agent skills. |
+| [team-handoffs](team-handoffs/SKILL.md) | Bot-team org structure, escalation, and priority rules for bot-to-bot messages. |
 
 ## Using a skill
 
