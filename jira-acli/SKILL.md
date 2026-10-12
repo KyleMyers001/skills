@@ -2,8 +2,9 @@
 name: jira-acli
 description: >-
   Retrieve and summarize Jira tickets, comments, attachments, or JQL results
-  with acli. Use whenever Kyle provides a Jira key such as BUS-9 or asks for a
-  Jira lookup.
+  with acli, and file new tickets without duplicates. Use whenever Kyle
+  provides a Jira key such as BUS-9, asks for a Jira lookup, or a workflow
+  needs a new ticket.
 compatibility: Requires an authenticated Atlassian CLI (acli) with access to the requested Jira site.
 metadata:
   argument-hint: <Jira key or lookup request>
@@ -93,3 +94,31 @@ Do not comment, edit, assign, transition, link, archive, delete, or otherwise
 mutate tickets unless Kyle requests that specific action. Preview the change
 before applying it. Destructive actions require explicit confirmation
 immediately before execution.
+
+## Filing New Tickets
+
+Filing a ticket is a mutation. Do it only when Kyle asked for it or your
+workflow explicitly calls for it (for example, logging a non-blocking review
+follow-up). Whatever tool you file with, acli or the Jira connector:
+
+1. Pick the board on purpose. Bot-team engineering work goes to the
+   Engineering lab board (EL), not KAN or the Vesper board. Product work goes
+   to the board for that project (for example BUS for Voxloom, SAM1 for Then &
+   Now).
+2. Search before creating. Run a JQL search on the target project for the key
+   phrases of your summary and the source (PR number, parent ticket), done
+   tickets included:
+
+   ```bash
+   acli jira workitem search \
+     --jql 'project = BUS AND (summary ~ "settings sync" OR text ~ "voxloom#42") ORDER BY created DESC' \
+     --fields 'key,summary,status,created' --limit 20 --json
+   ```
+
+   If a match exists, comment on it or link to it instead of filing a new one.
+   If it is Done but the problem is back, say so and link the old key.
+3. Never retry a create blindly. If a create call times out or errors, search
+   for the summary first; the ticket often already exists.
+4. Report the key you created or reused, so the next reader doesn't file it
+   again.
+
