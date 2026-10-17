@@ -19,6 +19,7 @@ requirements before using it elsewhere.
 | [frontend-design](frontend-design/SKILL.md) | Design and build distinctive web interfaces. |
 | [gate](gate/SKILL.md) | Opt-in post-implementation verification: Herdr review, E2E evidence, audit, report, publish/update PR. |
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
+| [handoff](handoff/SKILL.md) | Produce an inline continuation prompt for a fresh Pi session. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
 | [lavish](lavish/SKILL.md) | Create reviewable HTML artifacts for visual or complex responses. |
 | [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
