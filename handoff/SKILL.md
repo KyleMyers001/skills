@@ -1,9 +1,9 @@
 ---
 name: handoff
 description: >-
-  Produce a copyable continuation prompt for a fresh Pi session. Use only when
-  Kyle explicitly requests a session handoff, not for routine summaries,
-  compaction, or agent-to-agent task delegation.
+  Save a continuation document for a fresh Pi session under Workbench/Handoffs.
+  Use only when Kyle explicitly requests a session handoff, not for routine
+  summaries, compaction, or agent-to-agent task delegation.
 disable-model-invocation: true
 ---
 
@@ -35,9 +35,8 @@ recover. Produce the handoff; do not continue the underlying task.
 
 ## Write
 
-Return one fenced Markdown block containing a self-contained continuation
-prompt, with no commentary outside it. Use these headings; omit optional
-sections that add nothing:
+Write a self-contained continuation document in Markdown, without an enclosing
+code fence. Use these headings; omit optional sections that add nothing:
 
 - **Goal and latest request:** objective, next-session focus, and relevant
   constraints.
@@ -64,10 +63,16 @@ when necessary; never include their values.
 
 ## Delivery
 
-Default to inline output only. In Pi, Kyle can use `/copy`, then `/new`, then
-paste. Do not switch sessions, copy to the clipboard, or launch agents yourself.
+Save the document under `~/Workbench/Handoffs/`, creating the directory if
+needed. Use a descriptive filename such as `YYYY-MM-DD-HHMMSS-topic.md`; check
+for collisions and choose a new name rather than overwriting. Honor an explicitly
+requested destination, but never overwrite an existing file without confirmation.
 
-Save a file only on request. Use the requested path, or a new uniquely named
-file under `~/Workbench/` by default. Do not overwrite an existing file without
-confirmation. Save the block's contents and include the absolute saved path
-inside the handoff so the response remains a single copyable block.
+Verify the file was written and contains the handoff before reporting success.
+Return only its full absolute filesystem path on one plain-text line. Expand
+`~`; do not use a Markdown link, backticks, a code block, or a `file://` URL.
+Do not repeat the handoff contents in chat. If saving fails, report the failure
+instead of presenting a nonexistent file as saved.
+
+Kyle can ask a fresh Pi session to read that path. Do not switch sessions, copy
+to the clipboard, or launch agents yourself.
