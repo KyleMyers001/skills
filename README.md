@@ -25,7 +25,7 @@ requirements before using it elsewhere.
 | [meme-generator](meme-generator/SKILL.md) | Find and render recognizable meme templates with the bundled Python tool. |
 | [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
 | [fable-review](orchestration/fable-review/SKILL.md) | Request a Fable review through Claude Code and Herdr. |
-| [goal-loop](orchestration/goal-loop/SKILL.md) | Draft verifiable goal prompts and guide persistent agent loops. |
+| [goal-loop](orchestration/goal-loop/SKILL.md) | Author Ralph loop prompts. |
 | [herdr](orchestration/herdr/SKILL.md) | Coordinate coding agents in a Herdr session. |
 | [orchestrate-ticket](orchestration/orchestrate-ticket/SKILL.md) | Run an explicitly invoked ticket pipeline with delegated agents. |
 | [planning](planning/SKILL.md) | Create grounded implementation plans. |
@@ -80,3 +80,8 @@ Tools such as `agent-browser`, `acli`, and Herdr must be installed and
 configured separately where required. The descriptions in each `SKILL.md`
 specify when a skill should activate; in particular, opt-in workflows should not
 be triggered merely because their topic comes up.
+
+Goal-loop authors Ralph prompt packages under `~/Workbench/Goals/`: an execution
+prompt, small dependency-ordered tasks, and persistent progress. Reading the files
+does not authorize work. Explicit run approval covers runner-managed iterations;
+no arbitrary repair cap is imposed. The skill does not install or launch a runner.
