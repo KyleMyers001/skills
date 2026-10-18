@@ -25,6 +25,7 @@ requirements before using it elsewhere.
 | [meme-generator](meme-generator/SKILL.md) | Find and render recognizable meme templates with the bundled Python tool. |
 | [astra-review](orchestration/astra-review/SKILL.md) | Request an Astra review through Herdr. |
 | [fable-review](orchestration/fable-review/SKILL.md) | Request a Fable review through Claude Code and Herdr. |
+| [goal-loop](orchestration/goal-loop/SKILL.md) | Draft verifiable goal prompts and guide persistent agent loops. |
 | [herdr](orchestration/herdr/SKILL.md) | Coordinate coding agents in a Herdr session. |
 | [orchestrate-ticket](orchestration/orchestrate-ticket/SKILL.md) | Run an explicitly invoked ticket pipeline with delegated agents. |
 | [planning](planning/SKILL.md) | Create grounded implementation plans. |
