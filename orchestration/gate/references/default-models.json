@@ -1,0 +1,32 @@
+{
+  "reviewer": {
+    "agent": "gate-reader",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "xhigh"
+  },
+  "qa": {
+    "agent": "gate-reader",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "xhigh"
+  },
+  "auditor": {
+    "agent": "gate-reader",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high"
+  },
+  "developer": {
+    "agent": "gate-developer",
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high"
+  },
+  "astra_reviewer": {
+    "agent": "gate-reader",
+    "model": "openai-codex/gpt-6-astra",
+    "thinking": "high"
+  },
+  "fable_reviewer": {
+    "agent": "claude-code",
+    "model": "fable",
+    "thinking": "high"
+  }
+}

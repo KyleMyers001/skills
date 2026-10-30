@@ -12,7 +12,8 @@ description: >-
 ## Purpose and roles
 
 Coordinate planning → verified commit → gate delivery only on explicit invocation.
-Follow global safety and PR rules; use only Herdr's `Subagents` session.
+Follow global safety and PR rules. Ticket planner/developer use Herdr's
+`Subagents` session; Gate owns its workers through pi-subagents.
 
 - **Coordinator:** this session. Own approvals, handoffs, and gate; never edit
   ticket code. Keep Kyle's selected model/reasoning, including mid-run changes;
@@ -40,8 +41,10 @@ Follow global safety and PR rules; use only Herdr's `Subagents` session.
   never invent or substitute. Split `model` at first `/`; match provider/model
   columns exactly in `pi --list-models`. Availability is not auth.
 - Require readable [Herdr][herdr], gate, and [gate profiles][gate-models], plus
-  available Subagents. Reconcile competing gate runs/writers on this branch
-  before developer edits; leave other branches alone. Missing prerequisites stop.
+  available Herdr Subagents and Gate's pi-subagents prerequisites/discovered
+  agents (see [Gate setup][gate-setup]). Reconcile competing gate runs/writers
+  on this branch before developer edits; leave other branches alone.
+  Missing prerequisites stop.
 
 ## Working with agents
 
@@ -109,17 +112,21 @@ state before retrying, and never prompt a busy or ambiguously pending worker.
 ## 4. Verify and deliver
 
 Read gate to start/resume verify/deliver; follow its phases and budgets. Only
-Phase 6 publishes feature branches/PRs. Never merge.
+Gate Phase 5 publishes feature branches/PRs. Never merge.
 
 1. Confirm non-default branch, PR base, clean committed handoff HEAD/scope, gate
    prerequisites, and no competing writer/run. Record HEAD and attempt before
    starting: **at most two fresh gate invocations per approved execution**.
    Interrupted attempts count until reconciled; reattachment is not a new one.
 2. Pass requirements, exclusions, acceptance, later decisions/tradeoffs, plan,
-   and developer `workspace_id`/checkout before Phase 1. Gate adopts that live
-   workspace and waiting developer; never move/duplicate them or substitute a
-   missing workspace. Record gate run/workspace IDs and write ownership.
-3. Follow review → E2E plan → execution → audit → report → publish. Read full
+   and developer identity, existing transport/workspace IDs, and checkout before
+   Phase 1. This ticket coordinator remains that developer's transport owner:
+   when Gate routes a repair, use Herdr's existing-agent procedure, await the
+   same developer's committed handoff, then return custody to Gate. Never move
+   or duplicate the developer, or use a workspace ID as a subagent run ID.
+   Missing owner/liveness evidence blocks. Gate's own children use pi-subagents;
+   record Gate run/child IDs separately from ticket workspace IDs and custody.
+3. Follow review → QA (plan and execute) → audit → report → publish. Read full
    findings; resolve only authorized, in-scope, low-risk decisions. Relay ask-user
    items verbatim. Protected-path, scope, or behavior changes need Kyle. Keep
    gate's severities, routing, and audit; repairs use its budget and developer.
@@ -154,7 +161,7 @@ developer creates `<plan-id>-run.md` on startup. Resume, never overwrite. Persis
   Sanitize sensitive output and note redactions.
 
 On authorized-run resume, read the coordinator log and developer log if started;
-reconcile approval/plan, live checkout/HEAD, workers, gate workspace/outcome/custody,
+reconcile approval/plan, live checkout/HEAD, workers, gate child IDs/outcome/custody,
 and interrupted attempts. Intact evidence needs no new approval. Investigate hash
 mismatches; never replace stored hex or inherit approval after material changes.
 Stale handoffs cannot start gate.
@@ -172,8 +179,9 @@ processes, or delete worktrees. Agents may outlive the coordinator; resume it.
 [plan]: ../../planning/references/closed-loop-plan.md
 [loop]: ../../closed-loop/SKILL.md
 [developer]: ../../developer/SKILL.md
-[gate]: ../../gate/SKILL.md
-[gate-models]: ../../gate/references/default-models.json
+[gate]: ../gate/SKILL.md
+[gate-models]: ../gate/references/default-models.json
+[gate-setup]: ../gate/references/pi-subagents.md
 [models]: references/default-models.json
 [jira]: ../../jira-acli/SKILL.md
 [tree]: ../../git-worktree/SKILL.md

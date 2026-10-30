@@ -1,9 +1,12 @@
 # E2E Test Plan
 
-Use for an explicit E2E test-plan request or Gate's QA Planner assignment.
+Use for an explicit E2E test-plan request or Gate's QA planning assignment.
 The plan is an executable verification charter, not an implementation proposal
 or test-results report. Inspect the repository; do not run product checks, start
-services, author tests, or change product files while planning.
+services, author tests, or change product files while planning. Standalone plan
+requests end at handoff. Gate QA saves and validates the charter first, then
+executes in the same phase under Gate's explicit authority, without a separate
+planner handoff or planning roundtrip.
 
 ## Artifact & Handoff
 
@@ -22,8 +25,9 @@ services, author tests, or change product files while planning.
   the document, not the product. If unavailable, disclose the validation gap.
 - Return the filename as inline code plus at most three short bullets: coverage,
   blockers/decisions (or none), and validation gaps if any. For an agent handoff,
-  also return the absolute plan path and revision. Do not paste the plan into
-  chat or create HTML/YAML siblings.
+  also return the absolute plan path and revision. Gate QA includes these in its
+  execution return; it need not return between planning and execution unless
+  blocked. Do not paste the plan into chat or create HTML/YAML siblings.
 
 ## Content Rules
 

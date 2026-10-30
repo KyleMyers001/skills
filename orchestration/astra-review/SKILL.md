@@ -45,14 +45,10 @@ available for inspection/tests.
    `herdr agent start` / `agent prompt` yourself. Model and reasoning flags after
    `--` are the normal path. Never reuse an existing conversation.
 
-   When gate supplies its recorded `workspace_id`, read Herdr's workspace
-   guidance and add `--workspace <recorded-id>` before `--` in the launcher call
-   below, including delta/dispute reviews. Never omit it to recover from failure.
-   Otherwise use the fresh-workspace default; do not read the manual launch
-   reference just for an ordinary launch. For every gate review, including its
-   first standalone launch, return the launcher's workspace/tab/pane IDs and name
-   to the coordinator for its run log; preserve known IDs on launch failure too.
-   Return these alongside the review without changing its text.
+   Use the fresh-workspace default; do not read the manual launch reference
+   just for an ordinary launch. [Gate](../gate/SKILL.md) handles named Astra
+   reviews through its own pi-subagents profile, not this Herdr runbook.
+   Never treat a subagent run ID as a Herdr workspace ID.
 
    Set the Bash tool timeout to 600000ms and the initial wait to 300000ms;
    reserve the rest for launch, verification, extraction, and subprocess cleanup.
