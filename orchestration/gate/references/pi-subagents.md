@@ -2,7 +2,8 @@
 
 Read before Gate Phase 1. Use the installed pi-subagents skill and its
 `guide` sections `tool-reference/retained-children`,
-`tool-reference/resume`, and `agents/tool-and-extension-selection` when needed.
+`tool-reference/resume`, `tool-reference/steer`, and
+`agents/tool-and-extension-selection` when needed.
 Do not use Herdr launch scripts, workspace IDs, terminal banners, or CLI flags.
 
 ## One-time setup
@@ -28,15 +29,18 @@ Gate symlink requires explicitly repointing it; do not replace it silently.
 `subagent({ action: "list", options: { capabilities: true } })` must expose:
 
 - `gate-reader`: native Pi, `read,bash`; no edit/write or child delegation.
-- `gate-planner`: native Pi, `read,bash,edit,write`; charter-only authority.
-- `gate-developer`: native Pi, same tools; single repair writer.
+- `gate-developer`: native Pi, `read,bash,edit,write`; single repair writer.
+
+`gate-planner.md` is an inactive compatibility artifact, not a required agent
+or active profile. Never launch an extra planner for Gate QA.
 
 Inspect `get` for definitions or overrides when source/tool/acceptance details
-are unclear. Reader and planner acceptance roles are read-only (this controls
+are unclear. Reader's acceptance role is read-only (this controls
 acceptance inference, not filesystem permissions). Developer explicitly uses
 checked evidence with `review.required: false` to override the writer's inferred
 review gate; Gate owns the mandatory independent delta-review.
-All three inherit global/repo instructions and have no nested delegation tools.
+Both active agents inherit global/repo instructions and have no nested
+delegation tools.
 A shadowing agent, machine placement, incompatible tools, or automatic child
 review policy must be reconciled before launch, not silently accepted.
 
@@ -61,12 +65,17 @@ subagent({
 ```
 
 `output` binds the response artifact; merely naming a path in the task does not.
-The planner separately saves the required charter with edit/write. QA shell
-artifacts stay in the evidence directory. Never request session sharing.
+QA saves/validates its charter before execution in the same phase. Its brief
+must grant shell writes only to the assigned absolute Workbench plan file
+(and creation of `~/Workbench/Plans/` if needed), assigned evidence directory,
+and explicitly charter-approved untracked non-source disposables. No arbitrary
+product writes; no edit/write tools. Review/audit remain entirely read-only;
+the runtime saves their responses. The response path must not be the charter.
+Never request session sharing.
 
 Persist returned worker ID and artifact paths, yield for completion, then open
 the saved output. Partial/failed output is not a pass. For completed native
-planner/developer/QA follow-ups, inspect exact-ID status and use:
+developer/QA follow-ups, inspect exact-ID status and use:
 
 ```javascript
 subagent({ action: "resume", id: "<latest worker ID>",
@@ -78,6 +87,22 @@ Record the new ID immediately. Resume retains model/tools; a fresh reviewer or
 auditor instead uses a new launch. Missing retained state blocks replacement.
 Ticket-owned developers are resumed by their existing owner/protocol, not this
 API; reconcile custody before and after each repair. No parallel writer.
+
+For live guidance, every steer call must explicitly disable automatic recovery:
+
+```javascript
+subagent({ action: "steer", id: "<exact live worker ID>",
+  message: "<scoped guidance>", options: { steeringRecovery: false } })
+```
+
+A missed acknowledgment is not completion or authority to pause/revive, stop,
+or replace a worker. Preserve the receipt and reconcile exact-ID state before
+any explicit recovery. Installed pi-subagents documents direct steer recovery as
+enabled by default (`schemas.ts`); the executor omits its recovery callback only
+when `steeringRecovery === false`. This disables the acknowledgment-timeout
+pause/revive path; it does not promise delivery or compliance. Verify the
+installed schema/implementation read-only if the contract changes; never test
+recovery against a live Gate writer.
 
 ## Explicit Astra / Fable selection
 

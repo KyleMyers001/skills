@@ -17,7 +17,7 @@ requirements before using it elsewhere.
 | [code-critique](code-critique/SKILL.md) | Review code, diffs, plans, and technical documents without editing them. |
 | [developer](developer/SKILL.md) | Guide straightforward implementation, bug fixes, and refactoring. |
 | [frontend-design](frontend-design/SKILL.md) | Design and build distinctive web interfaces. |
-| [gate](orchestration/gate/SKILL.md) | Opt-in post-implementation verification via pi-subagents: review, E2E evidence, audit, report, publish/update PR. |
+| [gate](orchestration/gate/SKILL.md) | Opt-in post-implementation verification via pi-subagents: review → QA (plan and execute) → audit → report → publish/update PR. |
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
 | [handoff](handoff/SKILL.md) | Save a continuation document under `~/Workbench/Handoffs/` and return its full path. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
@@ -78,6 +78,9 @@ persona launches, helper limits, and recovery.
 Gate requires pi-subagents and discovery of its bundled `agents/` directory;
 follow its [setup reference](orchestration/gate/references/pi-subagents.md).
 Existing Gate installations/symlinks must use `orchestration/gate`, not `gate`.
+QA saves/validates its durable charter and executes in one phase; no separate
+planner worker. Review/audit are read-only; QA shell writes are limited to its
+assigned Workbench plan/evidence and charter-approved disposables.
 The ticket pipeline still owns its existing planner/developer transport; Gate
 uses pi-subagents for its own workers and routes ticket repairs to that owner.
 

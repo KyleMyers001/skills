@@ -28,10 +28,9 @@ class GateProfileTests(unittest.TestCase):
 
     def test_profiles_pin_pi_subagents_roles_models_and_thinking(self):
         expected = {
-            "reviewer": ("gate-reader", "openai-codex/gpt-6.1-sol", "high"),
-            "e2e_planner": ("gate-planner", "openai-codex/gpt-6.1-sol", "xhigh"),
-            "qa": ("gate-reader", "openai-codex/gpt-6-luna", "max"),
-            "auditor": ("gate-reader", "openai-codex/gpt-6-luna", "max"),
+            "reviewer": ("gate-reader", "openai-codex/gpt-6.1-sol", "xhigh"),
+            "qa": ("gate-reader", "openai-codex/gpt-6.1-sol", "xhigh"),
+            "auditor": ("gate-reader", "openai-codex/gpt-6.1-sol", "high"),
             "developer": ("gate-developer", "openai-codex/gpt-6.1-sol", "high"),
             "astra_reviewer": ("gate-reader", "openai-codex/gpt-6-astra", "high"),
             "fable_reviewer": ("claude-code", "fable", "high"),
@@ -56,21 +55,22 @@ class GateProfileTests(unittest.TestCase):
                 self.assertNotIn("machine", fields)
                 self.assertNotEqual(fields.get("allowNestedSubagents"), "true")
 
-    def test_review_qa_and_audit_have_read_bash_without_edit_or_delegation(self):
+    def test_review_qa_and_audit_effective_tools_are_read_bash_only(self):
         for role in ("reviewer", "qa", "auditor", "astra_reviewer"):
             with self.subTest(role=role):
                 fields = self.agent_fields(role)
                 tools = {tool.strip() for tool in fields["tools"].split(",")}
+                excluded = {tool.strip() for tool in
+                            fields.get("excludeTools", "").split(",")}
                 self.assertEqual(tools, {"read", "bash"})
+                self.assertEqual(tools - excluded, {"read", "bash"})
                 self.assertEqual(fields["acceptanceRole"], "read-only")
 
-    def test_planner_and_developer_retain_tools_to_save_their_deliverables(self):
-        for role in ("e2e_planner", "developer"):
-            with self.subTest(role=role):
-                fields = self.agent_fields(role)
-                tools = {tool.strip() for tool in fields["tools"].split(",")}
-                self.assertEqual(tools, {"read", "bash", "edit", "write"})
-                self.assertNotIn("excludeTools", fields)
+    def test_only_developer_profile_has_product_edit_tools(self):
+        fields = self.agent_fields("developer")
+        tools = {tool.strip() for tool in fields["tools"].split(",")}
+        self.assertEqual(tools, {"read", "bash", "edit", "write"})
+        self.assertNotIn("excludeTools", fields)
 
 
 if __name__ == "__main__":

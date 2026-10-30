@@ -2,7 +2,7 @@
 name: gate
 description: >-
   Run the standalone post-implementation verification pipeline (pi-subagents code
-  review → E2E plan → QA evidence → always evidence-audit → Kyle report →
+  review → QA (plan and execute) → always evidence-audit → Kyle report →
   publish/update PR). Use **only** when Kyle says "gate" / "run the gate," or
   manually invokes this skill. Replaces the former no-mistakes ship/gate skill.
   Do **not** use for ordinary implement/fix, closed-loop, or orchestrate-ticket
@@ -19,11 +19,11 @@ tests, or shipping config yourself.
 
 Load the installed **pi-subagents** skill for launch/resume rules. Gate invocation
 authorizes these phase workers, not running Gate while maintaining this skill.
-Fixes go to [developer](../../developer/SKILL.md); plan/execute E2E with separate
-planner/executor children. Review and audit always get fresh contexts. Relay
+Fixes go to [developer](../../developer/SKILL.md); one QA child plans and executes
+E2E in a single phase. Review and audit always get fresh contexts. Relay
 findings verbatim; route by the **auditor's** cause. Durable state under
 `~/Workbench/Reports/`. No merge, deploy, force-push, or invented approvals.
-Feature-branch push and PR create/update happen only in Phase 6 after a clean
+Feature-branch push and PR create/update happen only in Phase 5 after a clean
 audit, and only when a remote exists.
 
 ## Scope and baseline
@@ -31,7 +31,7 @@ audit, and only when a remote exists.
 Need absolute repo/worktree and a **clean, committed** feature-branch HEAD for
 the completed change. Staged/unstaged/nonignored-untracked changes → stop before
 Phase 1 (do not commit the original input as coordinator). When publishing, record an **explicit
-push remote** (e.g. `origin`) and intended PR base before Phase 6 — do not infer
+push remote** (e.g. `origin`) and intended PR base before Phase 5 — do not infer
 the destination when multiple remotes exist. If there is no usable push remote,
 treat as local-only.
 
@@ -43,10 +43,11 @@ non-source** disposable paths (never tracked or source paths), via a fixed
 pathspec such as `:(exclude)<path>` / `-- . ':(exclude)<path>'` applied
 consistently to status, diff, and untracked hashing. Evidence under
 `~/Workbench/...` is hashed separately. Record identity before phase 1, after
-every developer return, after every read-only worker returns, before phase-3
-execution, and after teardown. Pre-run and post-teardown product identity
+every developer return, after every read-only worker returns, before phase-2
+QA execution, and after teardown. Pre-run and post-teardown product identity
 **must match**. Teardown must restore it; if disposables cannot be torn down to
-match, stop before phase 3. Unexpected product-tree drift → invalidate and stop.
+match, stop before phase-2 execution. Unexpected product-tree drift → invalidate
+and stop execution; still audit any execution record.
 
 - `work-id`: ticket key if known, else `gate-<YYYY-MM-DD>-<short-slug>`.
 - Each invocation: unique `run-id` = `<work-id>-<YYYYMMDD-HHMMSS>` (local).
@@ -59,7 +60,8 @@ match, stop before phase 3. Unexpected product-tree drift → invalidate and sto
 
 Use the **same absolute checkout** for every phase: explicit `cwd`,
 `worktree: false`. Gate never allocates child worktrees or changes branches.
-Only one developer may write; other children must finish before remediation.
+Only one developer may write product files; other children must finish before
+remediation.
 Persist Gate's `run-id` separately from each returned **subagent run ID**, role,
 model/reasoning, session/artifact paths, completion state, and pending task in
 `<run-id>-gate-run.md` before further launches. Save each resume's new ID and
@@ -69,9 +71,12 @@ Launch asynchronously (`async: true`) and yield for native completion notices;
 no sleep, polling, or `bg_wait` for ordinary children. A launch receipt, timeout,
 or silence is not completion. Inspect output/artifacts before advancing. For
 recovery, use exact-ID `status` (transcript view only as needed), then `resume`
-for a completed/paused child or `steer` for a live one. Resume keeps the stored
-model/tools; never pass a replacement agent/model. Review, delta-review,
-dispute, and audit always launch **new**, with `options.context: "fresh"`
+for a completed/paused child or `steer` for a live one. Every live steer must
+set `options: { steeringRecovery: false }`: a missed acknowledgment must not
+automatically pause/revive or replace the child. Reconcile exact-ID state before
+any explicit recovery. Resume keeps the stored model/tools; never pass a
+replacement agent/model. Review, delta-review, dispute, and audit always launch
+**new**, with `options.context: "fresh"`
 for native children (the Fable adapter is inherently fresh).
 
 On coordinator resume, reconcile saved worker IDs, checkout/identity, custody,
@@ -87,11 +92,10 @@ cleanup, or session sharing.
 | --- | --- | --- |
 | Reviewer | `reviewer` | Default [code-critique](../../code-critique/SKILL.md). Select `astra_reviewer` / `fable_reviewer` only when Kyle names that reviewer; naming authorizes a **fresh** launch each review, delta-review, and dispute. |
 | Developer | `developer` | Scoped remediation; see constraints below. |
-| E2E planner | `e2e_planner` | [planning](../../planning/SKILL.md), E2E mode. Saves charter under `~/Workbench/Plans/` with edit/write. Product checkout read-only. |
-| E2E executor | `qa` | Runs charter; [agent-browser](../../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); reader agent has no edit/write tools. Coordinator may assemble the formal record from its reply. |
+| QA | `qa` | Plans, saves/validates charter, then executes it; [planning](../../planning/SKILL.md), E2E mode, and [agent-browser](../../agent-browser/SKILL.md) when browser. Shell writes only to assigned plan/evidence and charter-approved disposables; no edit/write tools or product edits. No final verdict. Coordinator may assemble the formal record from its reply. |
 | Auditor | `auditor` | Separate fresh launch after every execution **record**. |
-| Report | — | [report](../../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
-| Publish | — | Phase 6 when a remote exists. |
+| Report | — | [report](../../report/SKILL.md). Gate invoke = explicit Phase 4 report request (including blocked runs). |
+| Publish | — | Phase 5 when a remote exists. |
 
 Developer commits fixes on the feature branch; no E2E authorship, push, or PR.
 **Standalone:** launch the developer once, then resume its latest returned ID
@@ -125,17 +129,19 @@ unavailable model, or incompatible tools → stop; never substitute.
 If only `subagents_enable` is visible, call it; `subagent` appears on the next
 model request. Inspect `list` with `options.capabilities: true` and `models`.
 Verify bundled Gate agents are discovered and effective tools match their role:
-review/QA/audit have read + bash but no edit/write or delegation; planner has
-edit/write to save its plan. Tool allowlists are not a Bash sandbox: prompts
-must forbid product writes except developer repairs and charter-approved
-disposables. Verify any shadowing definitions/overrides, not just agent names.
+review/QA/audit have read + bash but no edit/write or delegation; only developer
+has product-edit tools. Tool allowlists are not a Bash sandbox: prompts must
+keep review/audit entirely read-only and grant QA only its assigned plan file,
+evidence directory, and charter-approved untracked non-source disposables.
+Forbid all other product writes except developer repairs. Verify any shadowing
+definitions/overrides, not just agent names.
 
 Launch with the profile's `agent`, `model: "<model>:<thinking>"`, explicit `cwd`,
 `worktree: false`, `async: true`, `options: { context: "fresh" }`, and the full
 task. Do **not** pass `thinking` separately: dispatch ignores it. Use `output`
-for a unique absolute response path under the evidence dir; save the planner's
-short handoff there, not over its charter. Inspect returned model/reasoning when
-available and stop on a mismatch. Runtime acceptance is evidence, never a
+for a unique absolute response path under the evidence dir, never over the
+saved charter. Inspect returned model/reasoning when available and stop on a
+mismatch. Runtime acceptance is evidence, never a
 replacement for Gate's independent review, charter, and audit.
 
 Named reviewers still use pi-subagents, **not** the Astra/Fable Herdr skills.
@@ -154,10 +160,10 @@ Follow the reference's evidence-handoff and billing checks, or stop.
 - Route only by auditor cause:
   - **Code** → developer (counts) → delta-review → invalidate prior execution
     evidence → **full charter** on new baseline → re-audit.
-  - **QA/evidence** → executor re-collects → re-audit.
+  - **QA/evidence** → QA re-collects → re-audit.
   - **Runtime capability** → escalate only if auditor confirms.
-- After any execution **record**, always phase 4. Target-env failures reported
-  by a running executor go to phase 4 first — never escalate those from phase 3.
+- After any execution **record**, always phase 3. Target-env failures reported
+  by running QA go to phase 3 first — never escalate those from phase 2.
 
 ## Phase 1 — Review
 
@@ -178,59 +184,69 @@ Relay verbatim; developer returns
 launch) in the same cycle; standing disagreement → escalate. Re-baseline →
 delta-review. Clean → phase 2.
 
-## Phase 2 — E2E plan
+## Phase 2 — QA — plan and execute
 
-Launch `e2e_planner` with explicit instructions to read
-[planning](../../planning/SKILL.md) and its
-[E2E test-plan reference](../../planning/references/e2e-test-plan.md) (resolve both
-to absolute paths in the prompt). Do not run product tests or edit product files.
+Launch `qa` once with explicit instructions to read
+[planning](../../planning/SKILL.md) in E2E mode and its
+[E2E test-plan reference](../../planning/references/e2e-test-plan.md) (absolute
+paths in the prompt). QA owns planning plus execution; no separate planner child
+or handoff and no planning roundtrip for a ready charter.
 
-Assign `~/Workbench/Plans/<run-id>-e2e-test-plan.md` as the required deliverable.
-Pass its absolute path, the run log, evidence directory, acceptance/scope, and
-current baseline identity. edit/write stay available so it can save that
-markdown file. Do not edit product files. Require the reference's compact
-format and a short reply with the absolute path, revision, coverage, and
-blockers — no inline plan.
+Assign the absolute `~/Workbench/Plans/<run-id>-e2e-test-plan.md`, run log,
+evidence directory, acceptance/scope, permissions, and current baseline identity.
+Grant QA shell-write authority only to that assigned plan file (creating
+`~/Workbench/Plans/` if needed), the assigned evidence directory, and explicitly
+charter-approved untracked non-source disposables. Product source/tests/config
+stay read-only; no edit/write tools. Review/audit get no file-write authority.
 
-Open the saved file before Phase 3; check the reference's coverage, standard
-commands, evidence contract, and teardown requirements. Record its absolute path
-and revision in the run log; pass the same artifact to executor and auditor.
-Chat-only output or an unreadable/missing plan → have the planner save it before
-continuing; do not treat the chat as the charter. Blocking gap → ask Kyle.
-After code remediation, have the planner reconcile the saved plan with the new
-baseline and update its revision before the full re-run; do not narrow coverage.
+Before product checks or services, QA must save and read back the charter;
+validate its compact format, acceptance coverage, grounded standard commands
+(unit/lint/typecheck with sources or explicit gaps), stable check/case IDs,
+evidence contract, scope/exclusions, permissions, disposables, and teardown.
+Follow the reference's document validation; disclose validation gaps. Missing or
+unreadable charter, blocking gaps, or absent execution/teardown authority → save
+a blocked charter if possible, report the exact gap, and do not execute unsafely.
+A chat-only plan never authorizes execution. No-record planning blockers go to
+Kyle; any execution record goes to Phase 3 first.
 
-## Phase 3 — Execute
+Ready → proceed in the same QA phase, before executing recheck current baseline
+and record pre-run product identity. Execute the full saved charter in order →
+evidence dir. Retain each stable ID, expected, observed,
+pass/fail/unverified/blocked, artifact path, and pre-run identity in the record.
+After teardown, recompute identity: must equal pre-run; mismatch → invalidate
+and stop execution, preserving the record for audit. Suspected target
+env/auth/tooling → blocked record → Phase 3. Subagent infrastructure failure
+without an execution record → stop; with a usable record, preserve it and attempt
+Phase 3 if available. If audit cannot launch, remain blocked; no repair, verdict,
+or publish without it.
 
-Executor (`qa`) reads the full saved plan on the current baseline. Execute the
-charter in order → evidence dir; retain its check/case IDs in the record.
-Each item: expected, observed, pass/fail/unverified/blocked, path, **pre-run
-product identity**. After teardown, recompute: must equal pre-run; mismatch →
-invalidate and stop. Suspected target env/auth/tooling → blocked record →
-phase 4. Subagent infrastructure failure without an execution record → stop;
-with a usable execution record, preserve it and attempt Phase 4 if available.
-If audit cannot launch, remain blocked; no repair, verdict, or publish without it.
+Return charter absolute path/Revision, coverage, blockers, record, artifact paths,
+and identities. Coordinator opens the same saved charter and records its path
+and revision in the run log for audit. For follow-ups, resume the latest QA ID.
+After code remediation, QA reads and reconciles the saved charter on the new
+baseline, increments Revision/Updated without narrowing coverage or changing
+stable IDs for retained cases, then validates it before the full re-run.
 
-## Phase 4 — Audit
+## Phase 3 — Audit
 
 New `auditor` launch with record, paths, saved plan path/revision, acceptance,
-matching pre/post identity, and the disposable-path list — including all-green
-and blocked records. Auditor reads the plan and opens artifacts, spot-checks
-cheap read-only charter checks
-when feasible, rejects bad disposable lists or identity mismatch, and states
+pre/post identities (must match for clean), and the disposable-path list —
+including all-green and blocked records. Auditor reads the plan and opens
+artifacts, spot-checks cheap read-only charter checks when feasible, rejects bad
+disposable lists or identity mismatch, and states
 cause (`code` / `QA-evidence` / `runtime-capability` / `clean`). Route per
 Budgets; re-audit after corrections.
 
-## Phase 5 — Report
+## Phase 4 — Report
 
 [report](../../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md` (also on
 blocked stops). Cover reviewed vs E2E-verified vs delivered; verification table;
 evidence links (**UNVERIFIED** if missing); remaining work; formatting
-uncertainties. Draft PR URL / final SHA / check-status fields here; **Phase 6
+uncertainties. Draft PR URL / final SHA / check-status fields here; **Phase 5
 must finalize them** (no placeholders left when the report is declared ready).
 [lavish](../../lavish/SKILL.md) only if Kyle asks.
 
-## Phase 6 — Publish
+## Phase 5 — Publish
 
 Only after auditor cause `clean` at the already-committed verified HEAD.
 
@@ -255,7 +271,7 @@ Only after auditor cause `clean` at the already-committed verified HEAD.
   if required checks are still running at timeout. Missing required checks
   after wait ≠ green.
 - Push/PR auth or protected-branch failure → stop and ask.
-- **Finalize the report before declaring ready:** for every Phase 6 outcome
+- **Finalize the report before declaring ready:** for every Phase 5 outcome
   (published with checks passed/failed/pending, local-only unpublished, or
   publish failure), update `<run-id>-gate.md` with the PR URL or unpublished
   note, full final SHA, push remote, intended base, and required-check status.

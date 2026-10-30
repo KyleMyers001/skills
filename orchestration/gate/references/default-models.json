@@ -2,22 +2,17 @@
   "reviewer": {
     "agent": "gate-reader",
     "model": "openai-codex/gpt-6.1-sol",
-    "thinking": "high"
-  },
-  "e2e_planner": {
-    "agent": "gate-planner",
-    "model": "openai-codex/gpt-6.1-sol",
     "thinking": "xhigh"
   },
   "qa": {
     "agent": "gate-reader",
-    "model": "openai-codex/gpt-6-luna",
-    "thinking": "max"
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "xhigh"
   },
   "auditor": {
     "agent": "gate-reader",
-    "model": "openai-codex/gpt-6-luna",
-    "thinking": "max"
+    "model": "openai-codex/gpt-6.1-sol",
+    "thinking": "high"
   },
   "developer": {
     "agent": "gate-developer",

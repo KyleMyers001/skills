@@ -1,6 +1,6 @@
 ---
 name: gate-planner
-description: Write or reconcile Gate's E2E charter without changing the product
+description: Inactive compatibility artifact; Gate QA now plans and executes
 tools: read, bash, edit, write
 acceptanceRole: read-only
 systemPromptMode: append
@@ -9,6 +9,10 @@ inheritGlobalContext: true
 inheritSkills: false
 defaultContext: fresh
 ---
+
+Inactive compatibility artifact: not an active Gate profile or discovery
+prerequisite. Do not launch for the current Gate flow; QA owns planning plus
+execution. The legacy charter-only contract below is retained for compatibility.
 
 Read the supplied planning skill and E2E test-plan reference. Investigate the
 named baseline read-only, then save or revise only the assigned charter under

@@ -3,7 +3,7 @@ name: planning
 description: >-
   Create grounded implementation or E2E test plans under ~/Workbench/Plans.
   Use when Kyle asks to plan, scope, design, or outline work before coding,
-  requests an E2E test plan, or Gate assigns a QA Planner.
+  requests an E2E test plan, or Gate assigns QA charter planning.
 metadata:
   argument-hint: <task, ticket, or implementation goal>
 ---
@@ -15,11 +15,13 @@ it does not require a plan for ordinary development edits.
 
 ## Choose the Plan Type
 
-- **E2E test plan / Gate QA Planner:** read and follow
+- **E2E test plan / Gate QA planning:** read and follow
   [references/e2e-test-plan.md](references/e2e-test-plan.md) instead of the
   implementation workflow below. It defines the Markdown artifact, compact
-  format, and handoff. Plan only; do not run tests or implement changes.
-  Gate owns execution authorization and routing for its delegated planner.
+  format, and handoff. While planning, do not run tests or implement changes.
+  Standalone plan requests stop at the handoff. Gate QA saves and validates the
+  charter, then executes in the same phase under Gate's scope/permissions;
+  planning alone grants no execution authority.
 - **Implementation plan (including closed-loop):** follow the workflow below.
   Initially create only the plan; after approval, follow
   [Approval & Execution](#approval--execution).

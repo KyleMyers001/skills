@@ -112,7 +112,7 @@ state before retrying, and never prompt a busy or ambiguously pending worker.
 ## 4. Verify and deliver
 
 Read gate to start/resume verify/deliver; follow its phases and budgets. Only
-Phase 6 publishes feature branches/PRs. Never merge.
+Gate Phase 5 publishes feature branches/PRs. Never merge.
 
 1. Confirm non-default branch, PR base, clean committed handoff HEAD/scope, gate
    prerequisites, and no competing writer/run. Record HEAD and attempt before
@@ -126,7 +126,7 @@ Phase 6 publishes feature branches/PRs. Never merge.
    or duplicate the developer, or use a workspace ID as a subagent run ID.
    Missing owner/liveness evidence blocks. Gate's own children use pi-subagents;
    record Gate run/child IDs separately from ticket workspace IDs and custody.
-3. Follow review → E2E plan → execution → audit → report → publish. Read full
+3. Follow review → QA (plan and execute) → audit → report → publish. Read full
    findings; resolve only authorized, in-scope, low-risk decisions. Relay ask-user
    items verbatim. Protected-path, scope, or behavior changes need Kyle. Keep
    gate's severities, routing, and audit; repairs use its budget and developer.
