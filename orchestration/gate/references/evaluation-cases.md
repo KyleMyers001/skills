@@ -3,6 +3,11 @@
 Paper scenarios, not runtime instructions or proof of a live pipeline. During
 maintenance, verify observed tool calls separately from static/paper checks.
 
+From the repository root, run profile/agent metadata regression checks with
+`python3 -m unittest discover -s orchestration/gate/tests` and retained Herdr
+coverage with `python3 -m unittest discover -s orchestration/herdr/tests`.
+These static checks do not launch children or replace the scenarios below.
+
 - Explicit “run the gate” selects Gate and authorizes its phase children.
   “Update the gate skill” selects skill-authoring, not pipeline execution.
   Ordinary implementation and closed-loop do not auto-trigger Gate.

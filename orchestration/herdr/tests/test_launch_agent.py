@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 SCRIPT = SCRIPTS / "launch-agent.py"
+# Gate's pi-subagents profiles are covered by orchestration/gate/tests instead.
 PROFILE_PATHS = {
-    "gate": SCRIPTS.parents[2] / "gate/references/default-models.json",
     "orchestrate-ticket": (SCRIPTS.parents[1]
                            / "orchestrate-ticket/references/default-models.json"),
 }
@@ -980,13 +980,6 @@ class LaunchAgentTests(unittest.TestCase):
 
     def test_workflow_profile_pins_and_permissions(self):
         expected = {
-            "gate": {
-                "reviewer": ("gpt-6.1-sol", "high", "edit,write"),
-                "e2e_planner": ("gpt-6.1-sol", "xhigh", None),
-                "qa": ("gpt-6-luna", "max", "edit,write"),
-                "auditor": ("gpt-6-luna", "max", "edit,write"),
-                "developer": ("gpt-6.1-sol", "high", None),
-            },
             "orchestrate-ticket": {
                 "planner": ("gpt-6.1-sol", "max", None),
                 "developer": ("gpt-6.1-sol", "high", None),
@@ -1011,9 +1004,6 @@ class LaunchAgentTests(unittest.TestCase):
 
     def test_workflow_profiles_forward_flags_and_gate_one_prompt(self):
         changed = [
-            ("gate", "e2e_planner", "gpt-6.1-sol", "xhigh", "gpt-6-astra"),
-            ("gate", "qa", "gpt-6-luna", "max", "gpt-5.6-terra"),
-            ("gate", "auditor", "gpt-6-luna", "max", "gpt-5.6-terra"),
             ("orchestrate-ticket", "planner", "gpt-6.1-sol", "max",
              "gpt-6-astra"),
         ]
