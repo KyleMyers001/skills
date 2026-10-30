@@ -1,7 +1,7 @@
 ---
 name: gate
 description: >-
-  Run the standalone post-implementation verification pipeline (Herdr code
+  Run the standalone post-implementation verification pipeline (pi-subagents code
   review → E2E plan → QA evidence → always evidence-audit → Kyle report →
   publish/update PR). Use **only** when Kyle says "gate" / "run the gate," or
   manually invokes this skill. Replaces the former no-mistakes ship/gate skill.
@@ -17,10 +17,11 @@ Opt-in post-implementation verification ("gate" / "run the gate" / manual
 invoke). Replaces **no-mistakes**. Coordinate only — never edit target source,
 tests, or shipping config yourself.
 
-Fixes go to [developer](../developer/SKILL.md) via Herdr. Plan/execute E2E with
-planner/executor. Review and evidence-audit use separate workers. Sequence via
-[herdr](../orchestration/herdr/SKILL.md) (`--session Subagents`). Relay findings
-verbatim. Route by the **auditor's** cause. Durable state under
+Load the installed **pi-subagents** skill for launch/resume rules. Gate invocation
+authorizes these phase workers, not running Gate while maintaining this skill.
+Fixes go to [developer](../../developer/SKILL.md); plan/execute E2E with separate
+planner/executor children. Review and audit always get fresh contexts. Relay
+findings verbatim; route by the **auditor's** cause. Durable state under
 `~/Workbench/Reports/`. No merge, deploy, force-push, or invented approvals.
 Feature-branch push and PR create/update happen only in Phase 6 after a clean
 audit, and only when a remote exists.
@@ -28,14 +29,14 @@ audit, and only when a remote exists.
 ## Scope and baseline
 
 Need absolute repo/worktree and a **clean, committed** feature-branch HEAD for
-the completed change. Dirty staged/unstaged trees → stop before Phase 1 (do not
-commit the original input as coordinator). When publishing, record an **explicit
+the completed change. Staged/unstaged/nonignored-untracked changes → stop before
+Phase 1 (do not commit the original input as coordinator). When publishing, record an **explicit
 push remote** (e.g. `origin`) and intended PR base before Phase 6 — do not infer
 the destination when multiple remotes exist. If there is no usable push remote,
 treat as local-only.
 
-**Product identity** = HEAD plus the astra-review / code-critique **content
-digest** (tracked diffs and nonignored untracked files). Record the branch line
+**Product identity** = HEAD plus the
+[code-critique](../../code-critique/SKILL.md) **content digest** (tracked diffs and nonignored untracked files). Record the branch line
 for display only — do **not** fail identity on ahead/behind shifts from a
 background fetch. Exclude from the digest only charter-listed **untracked,
 non-source** disposable paths (never tracked or source paths), via a fixed
@@ -54,40 +55,58 @@ match, stop before phase 3. Unexpected product-tree drift → invalidate and sto
   `<run-id>-gate-evidence/` before phase 1; do not overwrite existing runs.
   Write a report on blocked stops too (state = blocked + reason).
 
-## Run workspace
+## Run custody
 
-Use one Herdr workspace per run, with separate worker conversations/tabs.
-**Standalone:** launch the first reviewer without `--workspace` and capture its
-returned ID. **Inside orchestrate-ticket:** adopt the waiting developer's live,
-verified workspace/checkout before Phase 1, including for the first reviewer.
-Persist `workspace_id` with `run-id` in `<run-id>-gate-run.md` before further
-launches. Pass `--workspace <recorded-id>` before `--` on every subsequent launch,
-including Astra/Fable and all review, repair, QA, and audit cycles; retain worker
-names and returned workspace/tab/pane IDs. Follow Herdr's workspace/recovery
-rules. On resume, reconcile the saved ID and pending work; missing, stale, or
-conflicting workspace evidence blocks launches, never permits a replacement.
-A new standalone run creates a workspace; resuming one does not.
+Use the **same absolute checkout** for every phase: explicit `cwd`,
+`worktree: false`. Gate never allocates child worktrees or changes branches.
+Only one developer may write; other children must finish before remediation.
+Persist Gate's `run-id` separately from each returned **subagent run ID**, role,
+model/reasoning, session/artifact paths, completion state, and pending task in
+`<run-id>-gate-run.md` before further launches. Save each resume's new ID and
+lineage; never resume an older ID after its successor exists.
+
+Launch asynchronously (`async: true`) and yield for native completion notices;
+no sleep, polling, or `bg_wait` for ordinary children. A launch receipt, timeout,
+or silence is not completion. Inspect output/artifacts before advancing. For
+recovery, use exact-ID `status` (transcript view only as needed), then `resume`
+for a completed/paused child or `steer` for a live one. Resume keeps the stored
+model/tools; never pass a replacement agent/model. Review, delta-review,
+dispute, and audit always launch **new**, with `options.context: "fresh"`
+for native children (the Fable adapter is inherently fresh).
+
+On coordinator resume, reconcile saved worker IDs, checkout/identity, custody,
+pending work, and budgets before any launch. Missing/conflicting worker state
+blocks replacement; never duplicate a writer, restart on elapsed time, or use
+a CLI/pane fallback. Launch/auth/permission/model/tool-setup failures stop and
+ask Kyle; preserve partial output and checkout state. No automatic stop,
+cleanup, or session sharing.
 
 ## Roles
 
 | Role | Profile | Notes |
 | --- | --- | --- |
-| Reviewer | `reviewer` | Default [code-critique](../code-critique/SKILL.md). [astra-review](../orchestration/astra-review/SKILL.md) / [fable-review](../orchestration/fable-review/SKILL.md) only when Kyle names them. Naming authorizes a **fresh** launch each review, delta-review, and dispute. |
+| Reviewer | `reviewer` | Default [code-critique](../../code-critique/SKILL.md). Select `astra_reviewer` / `fable_reviewer` only when Kyle names that reviewer; naming authorizes a **fresh** launch each review, delta-review, and dispute. |
 | Developer | `developer` | Scoped remediation; see constraints below. |
-| E2E planner | `e2e_planner` | [planning](../planning/SKILL.md), E2E mode. Writes the charter markdown under `~/Workbench/Plans/` with edit/write. Product checkout read-only. |
-| E2E executor | `qa` | Runs charter; [agent-browser](../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); `exclude_tools` blocks product-tree edit/write. Orchestrator may assemble the formal record from the reply into that dir. |
-| Auditor | `auditor` | Separate launch after every execution **record**. |
-| Report | — | [report](../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
+| E2E planner | `e2e_planner` | [planning](../../planning/SKILL.md), E2E mode. Saves charter under `~/Workbench/Plans/` with edit/write. Product checkout read-only. |
+| E2E executor | `qa` | Runs charter; [agent-browser](../../agent-browser/SKILL.md) when browser. No final verdict. Evidence only under the run's evidence dir (shell OK); reader agent has no edit/write tools. Coordinator may assemble the formal record from its reply. |
+| Auditor | `auditor` | Separate fresh launch after every execution **record**. |
+| Report | — | [report](../../report/SKILL.md). Gate invoke = explicit Phase 5 report request (including blocked runs). |
 | Publish | — | Phase 6 when a remote exists. |
 
 Developer commits fixes on the feature branch; no E2E authorship, push, or PR.
-**Standalone gate:** launch from `default-models.json`. **Inside
-orchestrate-ticket:** reuse the waiting ticket developer (keep its model); do
-not launch a second developer. Auditor confirms the disposable-path list is
-untracked non-source only.
+**Standalone:** launch the developer once, then resume its latest returned ID
+for repairs. **Inside orchestrate-ticket:** keep the waiting ticket developer
+and its model/checkout. The ticket coordinator owns that worker's existing
+transport; send repairs through that owner and await its committed handoff,
+never relaunch or pass a ticket workspace ID to `subagent`. Record owner,
+worker identity/protocol, and custody before Phase 1; missing owner or uncertain
+liveness blocks. All Gate-owned children use pi-subagents. Auditor confirms
+the disposable-path list is untracked non-source only.
 
-Handoffs: absolute paths, `run-id`, selected `workspace_id` (once established),
-baseline HEAD/identity, scope, return fields.
+Every handoff: absolute checkout/branch, Gate `run-id`, worker ID/owner,
+baseline HEAD/identity, scope/exclusions, applicable global/repo safety rules,
+artifact paths, expected return fields, and stop conditions. No child agents,
+branch changes, publication, or unapproved destructive operations.
 Consume accessible answers even if labels are messy — record missing fields as
 uncertainty in the run log/report. Escalate only when **must-fix classification**
 (risk score or severity label) or **auditor cause** is substantively unresolved so
@@ -97,29 +116,32 @@ plan is a required artifact, not a formatting preference.
 
 ## Launch profiles
 
-Ordinary launches **must** use
-[references/default-models.json](references/default-models.json), except the
-orchestrate-ticket developer reuse rule above. Missing file/key → stop; never
-invent fields. Edit the JSON to change defaults. `e2e_planner` must not set
-`exclude_tools`; it writes the charter markdown. If that field is set, stop
-and ask.
+Read [setup and launch contract](references/pi-subagents.md) before Phase 1.
+Profiles in [default-models.json](references/default-models.json) provide required
+`agent`, `model`, and `thinking`. Use them for every fresh launch except the
+ticket-owned developer. Change pins in JSON, not prose. Missing file/key/agent,
+unavailable model, or incompatible tools → stop; never substitute.
 
-Each profile has `kind`, `model` (`provider/model`), optional `thinking`,
-optional `exclude_tools` (Pi) and/or `disallowed_tools` (Claude; set explicitly),
-and required `expect_startup` (string list).
+If only `subagents_enable` is visible, call it; `subagent` appears on the next
+model request. Inspect `list` with `options.capabilities: true` and `models`.
+Verify bundled Gate agents are discovered and effective tools match their role:
+review/QA/audit have read + bash but no edit/write or delegation; planner has
+edit/write to save its plan. Tool allowlists are not a Bash sandbox: prompts
+must forbid product writes except developer repairs and charter-approved
+disposables. Verify any shadowing definitions/overrides, not just agent names.
 
-1. Confirm the model exists: Pi → `pi --list-models`; Claude → `claude --help`
-   and `claude auth status`.
-2. `--kind` from `kind`. After `--`: `--model <model>`; if `thinking` set, Pi
-   gets `--thinking <thinking>`, Claude gets `--effort <thinking>`.
-3. Pass every `expect_startup` entry via repeated `--expect-startup`. For Pi,
-   include basename and contiguous `"basename • thinking"` when reasoning is
-   set. For Claude, use only JSON phrases. Never invent banner text beyond that
-   list.
-4. If `exclude_tools` is set (Pi), pass `--exclude-tools <value>`. If
-   `disallowed_tools` is set (Claude), pass `--disallowed-tools <value>`.
-5. `submitted: false` / auth / permission / `startup_unexpected` on **any**
-   mid-run launch → stop and ask Kyle (no audit path without a record).
+Launch with the profile's `agent`, `model: "<model>:<thinking>"`, explicit `cwd`,
+`worktree: false`, `async: true`, `options: { context: "fresh" }`, and the full
+task. Do **not** pass `thinking` separately: dispatch ignores it. Use `output`
+for a unique absolute response path under the evidence dir; save the planner's
+short handoff there, not over its charter. Inspect returned model/reasoning when
+available and stop on a mismatch. Runtime acceptance is evidence, never a
+replacement for Gate's independent review, charter, and audit.
+
+Named reviewers still use pi-subagents, **not** the Astra/Fable Herdr skills.
+Astra uses the pinned native profile. Fable uses the `claude-code` adapter with
+subscription auth and high effort; it cannot inspect the checkout itself.
+Follow the reference's evidence-handoff and billing checks, or stop.
 
 ## Budgets and routing
 
@@ -139,7 +161,10 @@ and required `expect_startup` (string list).
 
 ## Phase 1 — Review
 
-Launch reviewer. Default code-critique returns **Risk: N/10**. When using
+Launch the default reviewer with explicit instructions to read the absolute
+[code-critique](../../code-critique/SKILL.md) path and inspect the full comparison
+against the intended base (not just the clean working tree). Default review
+returns **Risk: N/10**. When using
 Astra/Fable, **append** to the launch prompt: label every finding
 Critical/High/Medium/Low (in addition to any merge verdict). If risk scores or
 severity labels are substantively unresolved so must-fix is undecidable →
@@ -156,8 +181,8 @@ delta-review. Clean → phase 2.
 ## Phase 2 — E2E plan
 
 Launch `e2e_planner` with explicit instructions to read
-[planning](../planning/SKILL.md) and its
-[E2E test-plan reference](../planning/references/e2e-test-plan.md) (resolve both
+[planning](../../planning/SKILL.md) and its
+[E2E test-plan reference](../../planning/references/e2e-test-plan.md) (resolve both
 to absolute paths in the prompt). Do not run product tests or edit product files.
 
 Assign `~/Workbench/Plans/<run-id>-e2e-test-plan.md` as the required deliverable.
@@ -182,7 +207,9 @@ charter in order → evidence dir; retain its check/case IDs in the record.
 Each item: expected, observed, pass/fail/unverified/blocked, path, **pre-run
 product identity**. After teardown, recompute: must equal pre-run; mismatch →
 invalidate and stop. Suspected target env/auth/tooling → blocked record →
-phase 4. Mid-run Herdr launch failure → stop (see Launch).
+phase 4. Subagent infrastructure failure without an execution record → stop;
+with a usable execution record, preserve it and attempt Phase 4 if available.
+If audit cannot launch, remain blocked; no repair, verdict, or publish without it.
 
 ## Phase 4 — Audit
 
@@ -196,12 +223,12 @@ Budgets; re-audit after corrections.
 
 ## Phase 5 — Report
 
-[report](../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md` (also on
+[report](../../report/SKILL.md) → `~/Workbench/Reports/<run-id>-gate.md` (also on
 blocked stops). Cover reviewed vs E2E-verified vs delivered; verification table;
 evidence links (**UNVERIFIED** if missing); remaining work; formatting
 uncertainties. Draft PR URL / final SHA / check-status fields here; **Phase 6
 must finalize them** (no placeholders left when the report is declared ready).
-[lavish](../lavish/SKILL.md) only if Kyle asks.
+[lavish](../../lavish/SKILL.md) only if Kyle asks.
 
 ## Phase 6 — Publish
 
@@ -232,7 +259,7 @@ Only after auditor cause `clean` at the already-committed verified HEAD.
   (published with checks passed/failed/pending, local-only unpublished, or
   publish failure), update `<run-id>-gate.md` with the PR URL or unpublished
   note, full final SHA, push remote, intended base, and required-check status.
-  Revalidate that no placeholders remain ([report](../report/SKILL.md)). Only
+  Revalidate that no placeholders remain ([report](../../report/SKILL.md)). Only
   then treat the gate report as ready for Kyle / orchestrate-ticket.
 
 ## Stop
@@ -240,11 +267,13 @@ Only after auditor cause `clean` at the already-committed verified HEAD.
 Ask Kyle when: dirty/uncommitted input before Phase 1; developer budget
 exhausted with must-fix **or** outstanding auditor `code` cause; two
 no-progress evidence cycles; auditor-confirmed runtime blockers; tool/model/
-Herdr gaps (pre-phase-1 or mid-run launch failure); phase-2 blocking gaps;
+subagent gaps (pre-phase-1 or mid-run launch failure); phase-2 blocking gaps;
 safety-sensitive needs; unexpected identity drift; audit undecidable (missing
 cause); publish failure. Preserve useful work; still write the blocked report.
 
-[closed-loop](../closed-loop/SKILL.md) is upstream implementation — not part of
-gate unless Kyle asks separately.
-[orchestrate-ticket](../orchestration/orchestrate-ticket/SKILL.md) may invoke gate
-for verify/deliver; gate owns publish when an explicit push remote is recorded.
+[closed-loop](../../closed-loop/SKILL.md) is upstream implementation — not part
+of gate unless Kyle asks separately.
+[orchestrate-ticket](../orchestrate-ticket/SKILL.md) may invoke gate for
+verify/deliver; gate owns publish when an explicit push remote is recorded.
+
+[Evaluation cases](references/evaluation-cases.md): authoring only, never runtime.

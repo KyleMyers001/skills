@@ -33,9 +33,11 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Fresh planner/developer launch and initial submission follow Herdr's Fresh
   Launch procedure with the selected worker profile, not a ticket-owned command
   recipe. A Herdr script rename alone requires no ticket instruction edits.
-- Planner and developer receive separate fresh workspaces. Gate receives the
-  developer's recorded workspace and reuses that developer for remediation;
-  missing workspace evidence blocks handoff, not permission for a replacement.
+- Planner and developer receive separate fresh Herdr workspaces. Gate receives
+  the same waiting developer's identity/checkout and its ticket coordinator as
+  transport owner. Repairs return to that developer through its owner; Gate's
+  own children use pi-subagents. Missing owner/liveness evidence blocks; no
+  duplicate developer or workspace-ID-to-subagent-ID conversion.
 - Planner revisions and developer repairs follow Herdr's existing-agent
   procedure after reconciling state; no fresh launch or prompt to a busy worker.
 - Blocked startup follows Herdr recovery without a second submission. Successful
@@ -76,7 +78,9 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Wrong checkout/base or another task's branch blocks checkout preparation.
   Do not create a second branch or move the developer to a replacement checkout.
 - Before gate, stale HEAD, missing acceptance evidence, competing writers, or
-  missing developer workspace evidence blocks submission, not verification duty.
+  missing developer owner/liveness evidence blocks submission, not verification duty.
+  Missing pi-subagents or undiscovered Gate agents block before implementation;
+  do not silently change settings, transport, model, or writer.
   Pass requirements, exclusions, acceptance, and later decisions intact. Read
   full findings, relay ask-user items verbatim, and retain routing and audit;
   remediation requires the full charter rerun against final HEAD.
