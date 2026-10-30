@@ -89,8 +89,9 @@ untracked non-source only.
 Handoffs: absolute paths, `run-id`, selected `workspace_id` (once established),
 baseline HEAD/identity, scope, return fields.
 Consume accessible answers even if labels are messy — record missing fields as
-uncertainty in the run log/report. Escalate only when **severity labels** (must-fix
-set) or **auditor cause** are substantively unresolved so routing cannot proceed;
+uncertainty in the run log/report. Escalate only when **must-fix classification**
+(risk score or severity label) or **auditor cause** is substantively unresolved so
+routing cannot proceed;
 do not invent classifications or re-prompt for formatting alone. Phase 2's saved
 plan is a required artifact, not a formatting preference.
 
@@ -123,8 +124,8 @@ and required `expect_startup` (string list).
 ## Budgets and routing
 
 - **Developer remediations:** max **3** per run (phase 1 + post-audit code).
-  Cycle = fix + commit + delta-review. Initial review free. Do not weaken
-  severity.
+  Cycle = fix + commit + delta-review. Initial review free. Do not lower risk
+  scores or severity labels to bypass must-fix routing.
 - **Evidence-only:** max **2 consecutive** with no progress (auditor cause and
   required evidence unchanged). Progress = artifacts that change auditor
   outcome, or a full charter re-run on a new baseline.
@@ -138,12 +139,16 @@ and required `expect_startup` (string list).
 
 ## Phase 1 — Review
 
-Launch reviewer. When using Astra/Fable, **append** to the launch prompt:
-label every finding Critical/High/Medium/Low (in addition to any merge
-verdict). If severities are substantively missing so must-fix is undecidable →
+Launch reviewer. Default code-critique returns **Risk: N/10**. When using
+Astra/Fable, **append** to the launch prompt: label every finding
+Critical/High/Medium/Low (in addition to any merge verdict). If risk scores or
+severity labels are substantively unresolved so must-fix is undecidable →
 escalate (no re-prompt).
 
-**Must-fix** = Critical/High only. Relay verbatim; developer returns
+**Must-fix** = code-critique scores **7–10**, or Astra/Fable labels
+**Critical/High**. Scores 1–6 and Medium/Low are nonblocking. Use the selected
+reviewer's rubric; do not invent score-to-label conversions.
+Relay verbatim; developer returns
 `fixed`/`disputed` and commits fixes on the feature branch. One dispute (fresh
 launch) in the same cycle; standing disagreement → escalate. Re-baseline →
 delta-review. Clean → phase 2.

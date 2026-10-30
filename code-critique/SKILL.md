@@ -69,23 +69,41 @@ requested.
 
 ## Findings
 
-Consolidate root causes and order by severity:
+Consolidate root causes and order by **risk (1–10): how often × how bad**, not
+worst-case impact alone. Use judgment anchored below, not literal multiplication
+or invented probabilities:
 
-- **Critical:** a traced path to catastrophic impact, such as broad compromise
-  or irreversible data loss; blocks shipping. Source evidence suffices without
-  executing a dangerous exploit.
-- **High:** significant correctness, security, or reliability defect on a
-  realistic path; fix before shipping.
-- **Medium:** meaningful bounded defect or regression risk; address or accept.
-- **Low:** concrete minor defect, maintainability problem, or scope issue worth
-  fixing; runtime failure is not required.
+- **1–2:** concrete minor defect or maintenance cost with limited exposure.
+- **3–4:** bounded, recoverable defect; infrequent exposure or modest impact.
+- **5–6:** meaningful defect with credible exposure; address or explicitly accept.
+- **7–8:** significant correctness, security, or reliability risk on a realistic
+  path; fix before shipping.
+- **9–10:** traced catastrophic risk or widespread severe failure; blocks shipping.
+  Source evidence suffices without executing a dangerous exploit.
 
-For each, give a specific title, severity, precise path and narrow line range
-(prefer changed lines; use document sections if needed), evidence, impact,
-trigger for bugs, and smallest useful fix or regression test. Do not invent
-line numbers, inflate severity, or present uncertainty as fact. Separate
-unresolved questions. Exclude personal formatting preferences, arbitrary size
-limits, and speculative refactors; tie findings to requirements or concrete cost.
+For each finding, include:
+
+- Specific title, **Risk: N/10**, precise path and narrow line range (prefer
+  changed lines; use document sections if needed), and evidence.
+- **How often:** realistic trigger, preconditions, and expected exposure in actual
+  usage, supported by callers, guards, configuration, or usage evidence. For
+  maintenance issues, describe when and how often the concrete cost is incurred.
+- **How bad:** consequence, affected scope, and recoverability when triggered.
+- Brief score rationale and smallest useful fix or regression test.
+
+Mark unknown likelihood explicitly and the score provisional; state assumptions
+or evidence needed rather than treating unknown as rare or common. Confidence
+in a finding is separate from likelihood of its trigger. An impossible trigger
+is not a bug finding; a merely imaginable one belongs in unresolved questions.
+Rare, recoverable edge cases should rank below comparable everyday failures.
+Rare compromise or irreversible loss can still block shipping: explain the
+credible path and why impact outweighs rarity. Lack of observed attacks is not
+proof of low exposure when an attacker can deliberately trigger the issue.
+
+Do not invent line numbers, inflate scores, or present uncertainty as fact.
+Separate unresolved questions. Exclude personal formatting preferences, arbitrary
+size limits, and speculative refactors; tie findings to requirements or concrete
+cost. Runtime failure is not required for a concrete quality finding.
 
 ## Boundaries and Handoff
 
