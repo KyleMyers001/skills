@@ -31,8 +31,7 @@ Gate symlink requires explicitly repointing it; do not replace it silently.
 - `gate-reader`: native Pi, `read,bash`; no edit/write or child delegation.
 - `gate-developer`: native Pi, `read,bash,edit,write`; single repair writer.
 
-`gate-planner.md` is an inactive compatibility artifact, not a required agent
-or active profile. Never launch an extra planner for Gate QA.
+QA owns planning and execution. Never launch an extra planner for Gate QA.
 
 Inspect `get` for definitions or overrides when source/tool/acceptance details
 are unclear. Reader's acceptance role is read-only (this controls

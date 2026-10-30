@@ -21,7 +21,9 @@ class GateWorkflowTests(unittest.TestCase):
         ])
         self.assertNotIn("e2e_planner", skill)
         setup = self.text(GATE / "references/pi-subagents.md")
-        self.assertNotRegex(setup, r"(?m)^- `gate-planner`:")
+        self.assertEqual({path.name for path in (GATE / "agents").glob("*.md")},
+                         {"gate-reader.md", "gate-developer.md"})
+        self.assertNotIn("gate-planner", setup)
         self.assertNotIn("Phase 6", skill + setup)
         ticket = self.text(ROOT / "orchestration/orchestrate-ticket/SKILL.md")
         self.assertIn("review → QA (plan and execute) → audit", ticket)
@@ -62,8 +64,6 @@ class GateWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, reader)
-        self.assertIn("Inactive compatibility artifact",
-                      self.text(GATE / "agents/gate-planner.md"))
 
 
 if __name__ == "__main__":
