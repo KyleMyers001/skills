@@ -257,7 +257,9 @@ Only after auditor cause `clean` at the already-committed verified HEAD.
   `verified, unpublished (local-only)`.
 - **Publish path:** record the explicit push remote and intended PR base in the
   run log. Confirm the branch is not the default. Non-force push to
-  `<push-remote>/<feature-branch>` only (`git push <remote> HEAD`). Never merge,
+  `<push-remote>/<feature-branch>` only:
+  `git push <push-remote> <feature-branch>` with the resolved literal branch name,
+  not HEAD-only or a computed destination. Never merge,
   never push the default branch, never force-push.
 - **Existing open PR for this branch:** read its base. If it matches the
   intended base, the push updates the head. If it differs, correct it with

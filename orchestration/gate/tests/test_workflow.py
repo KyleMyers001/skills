@@ -114,6 +114,7 @@ class GateWorkflowTests(unittest.TestCase):
             "No usable push remote", "Never merge",
             "never push the default branch", "never force-push",
             "Required checks only", "no placeholders remain",
+            "git push <push-remote> <feature-branch>",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, self.skill)
