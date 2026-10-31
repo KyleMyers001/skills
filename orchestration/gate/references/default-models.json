@@ -1,32 +1,32 @@
 {
   "reviewer": {
-    "agent": "gate-reader",
-    "model": "openai-codex/gpt-6.1-sol",
-    "thinking": "xhigh"
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "reasoning": "xhigh"
   },
   "qa": {
-    "agent": "gate-reader",
-    "model": "openai-codex/gpt-6.1-sol",
-    "thinking": "xhigh"
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "reasoning": "xhigh"
   },
   "auditor": {
-    "agent": "gate-reader",
-    "model": "openai-codex/gpt-6.1-sol",
-    "thinking": "high"
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "reasoning": "high"
   },
   "developer": {
-    "agent": "gate-developer",
-    "model": "openai-codex/gpt-6.1-sol",
-    "thinking": "high"
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "reasoning": "high"
   },
   "astra_reviewer": {
-    "agent": "gate-reader",
-    "model": "openai-codex/gpt-6-astra",
-    "thinking": "high"
+    "provider": "codex",
+    "model": "gpt-6-astra",
+    "reasoning": "high"
   },
   "fable_reviewer": {
-    "agent": "claude-code",
-    "model": "fable",
-    "thinking": "high"
+    "provider": "claude-code",
+    "model": "claude-fable-5-1",
+    "reasoning": "high"
   }
 }

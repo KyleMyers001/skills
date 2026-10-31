@@ -17,7 +17,7 @@ requirements before using it elsewhere.
 | [code-critique](code-critique/SKILL.md) | Review code, diffs, plans, and technical documents without editing them. |
 | [developer](developer/SKILL.md) | Guide straightforward implementation, bug fixes, and refactoring. |
 | [frontend-design](frontend-design/SKILL.md) | Design and build distinctive web interfaces. |
-| [gate](orchestration/gate/SKILL.md) | Opt-in post-implementation verification via pi-subagents: review → QA (plan and execute) → audit → report → publish/update PR. |
+| [gate](orchestration/gate/SKILL.md) | Opt-in post-implementation verification via BB child threads: review → QA (plan and execute) → audit → report → publish/update PR. |
 | [git-worktree](git-worktree/SKILL.md) | Manage task worktrees when the workflow calls for them. |
 | [handoff](handoff/SKILL.md) | Save a continuation document under `~/Workbench/Handoffs/` and return its full path. |
 | [jira-acli](jira-acli/SKILL.md) | Look up Jira issues using Atlassian's `acli`. |
@@ -75,14 +75,18 @@ it. See the [Herdr skill](orchestration/herdr/SKILL.md) for the normal workflow.
 See its [manual reference](orchestration/herdr/references/manual-launch.md) for
 persona launches, helper limits, and recovery.
 
-Gate requires pi-subagents and discovery of its bundled `agents/` directory;
-follow its [setup reference](orchestration/gate/references/pi-subagents.md).
+Gate uses fresh visible BB child threads with native Codex/Claude Code providers;
+follow its [setup reference](orchestration/gate/references/bb-threads.md).
+The BB coordinator stays unarchived in the same product environment. Gate saves
+results before archiving settled workers; no thread deletion or environment cleanup.
 Existing Gate installations/symlinks must use `orchestration/gate`, not `gate`.
 QA saves/validates its durable charter and executes in one phase; no separate
-planner worker. Review/audit are read-only; QA shell writes are limited to its
-assigned Workbench plan/evidence and charter-approved disposables.
-The ticket pipeline still owns its existing planner/developer transport; Gate
-uses pi-subagents for its own workers and routes ticket repairs to that owner.
+planner worker. Review/audit are read-only; QA writes are limited to its assigned
+Workbench plan/evidence and charter-approved disposables. BB role limits are
+prompt-enforced, not per-thread tool allowlists. Old Pi agent/setup files are
+legacy-only; no automatic settings removal or in-flight migration.
+The ticket pipeline still owns its existing Herdr planner/developer transport;
+Gate routes ticket repairs to that owner and never archives its developer.
 
 Tools such as `agent-browser`, `acli`, Herdr, and pi-subagents must be installed
 and configured separately where required. The descriptions in each `SKILL.md`

@@ -1,6 +1,13 @@
-# pi-subagents setup and launch contract
+# Legacy pi-subagents setup and launch contract
 
-Read before Gate Phase 1. Use the installed pi-subagents skill and its
+Historical reference for in-flight Pi Gate runs only. New runs use
+[BB thread setup](bb-threads.md); do not configure agent discovery, launch Pi
+workers, or migrate existing runs automatically from this file. The retained
+`../agents/` definitions are legacy-only and are not BB thread profiles.
+
+For an existing run, use its recorded Pi profiles/launch contract, not the current
+BB `default-models.json`. If those records are unavailable, stop for Kyle; do not
+reconstruct a launch from BB fields. Use the installed pi-subagents skill and its
 `guide` sections `tool-reference/retained-children`,
 `tool-reference/resume`, `tool-reference/steer`, and
 `agents/tool-and-extension-selection` when needed.

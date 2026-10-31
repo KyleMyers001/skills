@@ -13,7 +13,7 @@ description: >-
 
 Coordinate planning → verified commit → gate delivery only on explicit invocation.
 Follow global safety and PR rules. Ticket planner/developer use Herdr's
-`Subagents` session; Gate owns its workers through pi-subagents.
+`Subagents` session; Gate owns its workers through native BB child threads.
 
 - **Coordinator:** this session. Own approvals, handoffs, and gate; never edit
   ticket code. Keep Kyle's selected model/reasoning, including mid-run changes;
@@ -41,8 +41,10 @@ Follow global safety and PR rules. Ticket planner/developer use Herdr's
   never invent or substitute. Split `model` at first `/`; match provider/model
   columns exactly in `pi --list-models`. Availability is not auth.
 - Require readable [Herdr][herdr], gate, and [gate profiles][gate-models], plus
-  available Herdr Subagents and Gate's pi-subagents prerequisites/discovered
-  agents (see [Gate setup][gate-setup]). Reconcile competing gate runs/writers
+  available Herdr Subagents and Gate's BB project/environment/provider/model
+  prerequisites (see [Gate setup][gate-setup]). This BB coordinator must remain
+  unarchived in the exact product environment through Gate; role limits are
+  prompt-enforced, not per-thread tool allowlists. Reconcile competing gate runs/writers
   on this branch before developer edits; leave other branches alone.
   Missing prerequisites stop.
 
@@ -123,9 +125,11 @@ Gate Phase 5 publishes feature branches/PRs. Never merge.
    Phase 1. This ticket coordinator remains that developer's transport owner:
    when Gate routes a repair, use Herdr's existing-agent procedure, await the
    same developer's committed handoff, then return custody to Gate. Never move
-   or duplicate the developer, or use a workspace ID as a subagent run ID.
-   Missing owner/liveness evidence blocks. Gate's own children use pi-subagents;
-   record Gate run/child IDs separately from ticket workspace IDs and custody.
+   or duplicate the developer, or use a workspace ID as a BB thread ID.
+   Missing owner/liveness evidence blocks. Gate's own children use fresh BB
+   threads; it captures results before archiving only its settled workers, never
+   this ticket developer or coordinator. Record Gate run/BB thread IDs separately
+   from ticket workspace IDs and custody.
 3. Follow review → QA (plan and execute) → audit → report → publish. Read full
    findings; resolve only authorized, in-scope, low-risk decisions. Relay ask-user
    items verbatim. Protected-path, scope, or behavior changes need Kyle. Keep
@@ -181,7 +185,7 @@ processes, or delete worktrees. Agents may outlive the coordinator; resume it.
 [developer]: ../../developer/SKILL.md
 [gate]: ../gate/SKILL.md
 [gate-models]: ../gate/references/default-models.json
-[gate-setup]: ../gate/references/pi-subagents.md
+[gate-setup]: ../gate/references/bb-threads.md
 [models]: references/default-models.json
 [jira]: ../../jira-acli/SKILL.md
 [tree]: ../../git-worktree/SKILL.md

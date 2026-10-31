@@ -1,75 +1,98 @@
 # Gate authoring evaluation cases
 
 Paper scenarios, not runtime instructions or proof of a live pipeline. During
-maintenance, verify observed tool calls separately from static/paper checks.
+maintenance, distinguish static/paper checks from observed BB worker execution.
 
-From the repository root, run profile/agent metadata regression checks with
+From the repository root, run static profile/instruction regressions with
 `python3 -m unittest discover -s orchestration/gate/tests` and retained Herdr
 coverage with `python3 -m unittest discover -s orchestration/herdr/tests`.
-These static checks do not launch children or replace the scenarios below.
+Neither suite launches workers or replaces a separately authorized live trial.
 
-- Explicit “run the gate” selects Gate and authorizes its phase children.
+- Explicit “run the gate” selects Gate and authorizes its phase workers.
   “Update the gate skill” selects skill-authoring, not pipeline execution.
   Ordinary implementation and closed-loop do not auto-trigger Gate.
-- Missing pi-subagents, undiscovered Gate agents, missing profile keys, model
-  unavailability, tool mismatch, machine placement, or shadowing definitions
-  block before Phase 1. No settings rewrite, fallback model, CLI, or Herdr.
-- Profiles map `agent` and `model:thinking` to the actual schema. No separate
-  dispatch `thinking`, `exclude_tools`, startup phrases, or invented tool option.
-  Reviewer and QA pin Sol xhigh; auditor and developer pin Sol high. Named
-  Astra/Fable remain unchanged. No active `e2e_planner` profile or required
-  planner discovery; reader has read/bash only, developer also has edit/write.
-- Every fresh native child gets the exact checkout, `worktree: false`, async,
-  fresh context, artifact binding, safety rules, and no delegation/publication.
-  Gate's run ID and returned subagent IDs are distinct and persisted.
-- Completion notices wake the parent. A launch receipt, timeout, silence, or
-  attention notice neither advances phases nor triggers polling/relaunch.
-- Retained developer/QA follow-ups resume the latest returned ID and record its
-  successor. Every live steer sets `options: { steeringRecovery: false }`;
-  missed acknowledgment never authorizes automatic pause/revive/replacement.
-  Review/delta/dispute/audit instead launch fresh. Ambiguous custody or a missing
-  session stops. Verify recovery semantics read-only, not on a live writer.
+- Missing BB/provider/model/reasoning/auth, wrong project/environment/host,
+  retiring environment, absent unarchived coordinator in the product environment,
+  or incompatible required tools block before Phase 1. No permission elevation,
+  settings rewrite, replacement checkout, fallback model, Pi, or Herdr launch.
+- Profiles use BB `provider/model/reasoning`, not Pi agent names or model suffixes.
+  Reviewer/QA pin Sol xhigh; auditor/developer pin Sol high. Named Astra/Fable
+  retain high reasoning and require Kyle's selection. Catalogs are checked on
+  the actual target environment; observed identity mismatch stops. Missing
+  observations are uncertainty, not invented runtime confirmation.
+- Every Gate-owned launch is a fresh visible BB thread, explicitly parented with
+  automatic completion notifications in the exact project/environment. No fork,
+  new worktree, implicit model, or lifecycle-owner cascade. Run and BB IDs differ.
+- Role authority is prompt-enforced, not per-thread tool allowlists. Read/audit
+  cannot write; QA's only writes are assigned charter/evidence and approved
+  untracked non-source disposables; developer is the sole product writer.
+  Available tools never imply broader authority; every brief forbids delegation.
+- Save launch intent before dispatch and returned IDs/state before another launch.
+  A missing receipt, timeout, silence, attention notice, idle turn, or completed
+  wait does not prove phase completion or authorize another worker. Reconcile
+  lost receipts/duplicate notices through saved identity and parent children.
+- Yield for automatic parent notices and link visible workers. Blocking waits
+  are bounded; no sleep/status/log polling or promised native Codex waiting UI.
+  Worker questions/partial answers and stale prior turns do not advance phases.
+- Capture exact-turn answers verbatim to unique Workbench evidence paths, inspect
+  them and referenced artifacts, record custody/identity, then archive only the
+  exact settled Gate-owned child. Missing/empty/truncated capture retains the
+  child; never overwrite the QA charter. Secrets are redacted and disclosed as
+  redactions rather than relayed verbatim.
+- Before archive, confirm no queued work/interactions, unknown live attempt,
+  unexpected descendants/dependents, or lost shared-environment custodian.
+  Confirm archived state and unchanged active environment after cleanup. Archive
+  failure remains a reconciliation item, never a product verdict. No delete,
+  coordinator/external-developer archive, environment cleanup, or forced stop.
+- Completed standalone developer and QA attempts are captured/archived; repairs
+  use fresh threads and compact handoffs. Preserve findings/disputes, baseline,
+  prior evidence, charter path/revision/IDs, permissions, and run-wide budgets.
+  Unknown/active/interrupted workers instead require exact-state reconciliation;
+  no automatic restart/retry/unarchive/cancel, especially after a user stop.
+- Necessary live guidance uses exact-ID BB steer. A queued receipt is not failure
+  or proof of compliance; never resend or replace because acknowledgment missed.
+  Coordinator resume reconciles all intents/IDs/custody/queues/outputs/budgets
+  before dispatch. Legacy Pi runs retain recorded transport, not ID conversion.
 - Ticket handoff preserves the same waiting developer/model/checkout. Its
-  coordinator owns transport, including legacy workers; Gate never treats a
-  workspace ID as a subagent ID or creates a second remediation developer.
-- Named Astra uses its exact high-thinking native model. Named Fable uses the
-  read-only Claude Code adapter with subscription auth, high effort, and a
-  complete sanitized exact-baseline handoff. No API billing, native-only
-  adapter fields, missing-context pass, or Herdr-backed review skill launch.
+  coordinator owns Herdr transport; Gate routes repairs through that owner,
+  never spawns another writer, archives it, or treats a workspace ID as a BB ID.
+  Missing owner/liveness evidence blocks; no budget reset across workers.
+- Named Astra uses its exact native Codex high-reasoning profile. Named Fable
+  uses native Claude Code, subscription auth, high reasoning, and direct checkout
+  inspection. No API billing, handoff-only adapter claims, missing-context pass,
+  or Herdr-backed review-skill launch. Preserve severity labels/merge verdict.
 - Dirty input stops before Phase 1. Read-only-worker product drift invalidates
   the run. Display-only ahead/behind changes do not invalidate content identity.
   Only charter-listed untracked non-source paths may be excluded consistently.
-- Default Risk 7–10 / named Critical or High findings route to the developer.
-  Findings relay verbatim; unresolved substantive classification escalates.
-  Initial review is free; at most three repair+commit+delta-review cycles, one
-  fresh dispute per cycle, no severity downgrade or budget reset on resume.
-- Active flow is review → QA (plan and execute) → audit → report → publish.
-  QA saves/reads back/validates the charter at the assigned Workbench path before
-  product checks/services, then executes in that same phase. No separate planner
-  child, handoff, or unnecessary planning roundtrip. A chat-only/missing charter
-  or blocking coverage/permission/teardown gap prevents unsafe execution.
-- QA shell-write authority covers only its assigned plan file (and creating
-  `~/Workbench/Plans/` if needed), assigned evidence directory, and explicitly
-  charter-approved untracked non-source disposables. Review/audit write no files;
-  runtime saves responses. Bash is not blanket product-write authority.
-- Saved charter includes standard unit/lint/typecheck commands with sources or
-  gaps, acceptance/failure paths, stable IDs, scope/permissions, evidence, and
-  teardown. QA reconciles changed baselines and increments the saved revision
-  without narrowing coverage; audit opens that same charter and its evidence.
-  No-record planning blockers go to Kyle; every execution record goes to audit.
-- Every execution record, including blocked/all-green, gets a separate fresh
-  auditor. A target-env failure is evidence first, not immediate escalation.
-  Infrastructure failure with no record blocks; usable partial evidence is
-  preserved and audited if an auditor can launch.
-- Auditor cause alone routes: code → same developer → delta-review → full
-  charter on the new baseline → new audit; evidence → re-collect → new audit;
+- Default Risk 7–10 / named Critical or High findings route to developer.
+  Findings relay verbatim except secret redaction; unresolved substantive
+  classification escalates. Initial review is free; at most three
+  repair+commit+delta-review cycles, one fresh dispute per cycle, no severity
+  downgrade, budget reset, or concurrent writer. Standing disagreement escalates.
+- Flow remains review → QA (plan and execute) → audit → report → publish.
+  QA saves/reads back/validates its assigned Workbench charter before checks or
+  services, then executes in the same attempt. No extra planner or ready-plan
+  roundtrip; chat-only/missing charter or blocking gaps prevent unsafe execution.
+- Charter includes grounded standard unit/lint/typecheck commands or explicit
+  gaps, acceptance/failure paths, stable IDs, scope/permissions, evidence, approved
+  disposables, and teardown. Fresh QA reads the same charter and increments its
+  revision on changed baseline without narrowing coverage or changing retained
+  IDs. Code remediation requires the full charter rerun on the new baseline.
+- Every execution record, including blocked/all-green/partial, gets a separate
+  fresh auditor who opens that charter and artifacts. No-record planning blockers
+  go to Kyle. Target-env failure is evidence first; infrastructure failure with
+  usable records still attempts audit. If audit cannot launch, remain blocked.
+- Auditor cause alone routes: code → developer → delta-review → full charter →
+  fresh audit; QA/evidence → fresh QA re-collection → fresh audit;
   runtime-capability → Kyle. Two consecutive no-progress evidence rounds stop.
-- Teardown must restore product identity; missing teardown approval or any
-  drift blocks. Bash availability never grants destructive-operation approval.
-- A clean audit alone permits Phase 5 feature-branch non-force push/PR. Never
-  push main/master, merge, or deploy. No remote means verified/unpublished.
-  Existing PR base mismatch is corrected or escalated. Missing/pending/failed
-  required checks are not green; finalize exact SHA, PR/remote/base/status.
-- Blocked stops still produce the Gate report with useful evidence and exact
-  failure/custody. No automatic resource cleanup, cancellation, session sharing,
-  replacement checkout, duplicate report, or invented approval.
+  Cheap read-only audit spot-checks never mutate the product.
+- Teardown must restore product identity; missing authority or drift blocks.
+  Bash availability never grants destructive-operation approval. Keep evidence
+  and blocked reports; never clean up unknown active resources automatically.
+- Clean audit alone permits Phase 5 feature-branch non-force push/PR. Never push
+  main/master, merge, or deploy. No remote means verified/unpublished. Correct
+  wrong PR base or escalate. Missing/pending/failed required checks are not green;
+  finalize exact SHA, PR/remote/base/status with no report placeholders.
+- Blocked stops still produce the Gate report with useful evidence, missing
+  fields/uncertainty, exact custody, and unarchived/cleanup reconciliation work.
+  Native completion/runtime acceptance is not approval or independent audit.

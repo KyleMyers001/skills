@@ -36,8 +36,10 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Planner and developer receive separate fresh Herdr workspaces. Gate receives
   the same waiting developer's identity/checkout and its ticket coordinator as
   transport owner. Repairs return to that developer through its owner; Gate's
-  own children use pi-subagents. Missing owner/liveness evidence blocks; no
-  duplicate developer or workspace-ID-to-subagent-ID conversion.
+  own children use fresh visible BB threads, capture answers, and archive only
+  settled Gate-owned workers. Never archive the ticket developer/coordinator.
+  Missing owner/liveness evidence blocks; no duplicate developer or conversion
+  of a ticket workspace ID to a BB thread ID.
 - Planner revisions and developer repairs follow Herdr's existing-agent
   procedure after reconciling state; no fresh launch or prompt to a busy worker.
 - Blocked startup follows Herdr recovery without a second submission. Successful
@@ -78,9 +80,12 @@ actions separately from paper walkthroughs; no live trial is implied by lint.
 - Wrong checkout/base or another task's branch blocks checkout preparation.
   Do not create a second branch or move the developer to a replacement checkout.
 - Before gate, stale HEAD, missing acceptance evidence, competing writers, or
-  missing developer owner/liveness evidence blocks submission, not verification duty.
-  Missing pi-subagents or undiscovered Gate agents block before implementation;
-  do not silently change settings, transport, model, or writer.
+  missing developer owner/liveness evidence blocks submission, not verification
+  duty.
+  Missing BB/model/auth prerequisites or a coordinator outside the exact
+  product environment block before implementation. Gate's role limits are
+  prompt-enforced, not tool allowlists; do not silently change settings,
+  transport, model, or writer.
   Pass requirements, exclusions, acceptance, and later decisions intact. Read
   full findings, relay ask-user items verbatim, and retain routing and audit;
   remediation requires the full charter rerun against final HEAD.
