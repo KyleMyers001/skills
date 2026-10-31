@@ -79,6 +79,31 @@ class GateWorkflowTests(unittest.TestCase):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, setup)
 
+    def test_archive_checks_complete_non_parent_cascade(self):
+        archive = self.setup_text().split("## Archive", 1)[1].split(
+            "## Repairs", 1)[0]
+        for requirement in (
+            "bb thread list --include-hidden --json",
+            "parentThreadId", "sourceThreadId", "lifecycleOwnerThreadId",
+            "recursively", "archived", "cross-project",
+            "visible-only", "unarchivedDescendantCount",
+            "incomplete inventory", "retain the worker",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, archive)
+        self.assertNotIn("any known lifecycle dependents", archive)
+        self.assertNotIn("--parent-thread <worker-id>", archive)
+
+    def test_paper_cases_cover_non_parent_hidden_forks(self):
+        cases = " ".join(self.text(
+            "orchestration/gate/references/evaluation-cases.md").split())
+        for requirement in (
+            "non-parent hidden fork", "lifecycle-owned", "archived intermediary",
+            "incomplete inventory", "retain the worker",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, cases)
+
     def test_fresh_repairs_keep_custody_and_budgets(self):
         setup = self.setup_text()
         for requirement in (

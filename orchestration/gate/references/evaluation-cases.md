@@ -44,6 +44,17 @@ Neither suite launches workers or replaces a separately authorized live trial.
   Confirm archived state and unchanged active environment after cleanup. Archive
   failure remains a reconciliation item, never a product verdict. No delete,
   coordinator/external-developer archive, environment cleanup, or forced stop.
+- A non-parent hidden fork references the worker through `sourceThreadId` but
+  has no parent (or a different one). A lifecycle-owned thread references it
+  through `lifecycleOwnerThreadId` in another project/environment/host. An
+  archived intermediary links onward to live work. Even with an empty parent
+  query or visible-only cascade preview, recursively discover these targets
+  and retain the worker; never stop/archive the linked work automatically.
+- An incomplete inventory (missing relationship keys, failed/truncated/bounded
+  reads, unexhausted pagination, or missing worker) must retain the worker.
+  Explicit null relationship fields differ from omitted keys. A complete leaf
+  inventory permits existing settlement/capture/environment checks, not a claim
+  of atomic protection against later concurrent relationship creation.
 - Completed standalone developer and QA attempts are captured/archived; repairs
   use fresh threads and compact handoffs. Preserve findings/disputes, baseline,
   prior evidence, charter path/revision/IDs, permissions, and run-wide budgets.

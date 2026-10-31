@@ -111,13 +111,51 @@ inspected, and recorded. Before each archive confirm:
 1. Exact child ID and ownership; returned custody; settled state; no pending
    queued work/interactions or unresolved active attempt. Failed/partial workers
    with uncertain liveness are retained for reconciliation, not discarded.
-2. No unexpected descendants or lifecycle dependents: archival can cascade.
-   Inspect `bb thread list --parent-thread <worker-id> --include-hidden --json`
-   and any known lifecycle dependents; reconcile ambiguous ownership through
-   exact-ID show/log data. Unknown descendants/dependents block cleanup, never
-   archive others' work.
+2. No unexpected cascade targets: use the complete inventory below, not just
+   parented descendants or previously known dependents. Gate workers should be
+   leaves; any additional target is unexpected. Retain the worker for ownership
+   reconciliation instead of automatically archiving the cascade.
 3. An **unarchived coordinator** still occupies the exact shared product
    environment, which remains active/ready; capture and identity checks passed.
+
+### Complete cascade inventory
+
+Immediately before archive, capture the complete nondeleted thread inventory:
+
+```sh
+bb thread list --include-hidden --json
+```
+
+Do not add project/environment/host/parent filters or `--archived` (which selects
+only archived rows). The inspected CLI lists all nondeleted rows, including
+archived threads, when these filters are omitted. Verify completeness against
+the installed contract; if a version bounds/paginates the result, exhaust its
+supported pagination or retain the worker. Save/parse the full JSON outside chat
+output limits; record only IDs and relationship fields, not unrelated titles.
+
+Starting at the worker ID, recursively compute the visited-set closure over
+all three relationships for each reached ID:
+
+- `parentThreadId` equals the reached ID: parented descendants.
+- `visibility` is `hidden` and `sourceThreadId` equals it: hidden source forks,
+  even when they have no parent or have a different parent.
+- `lifecycleOwnerThreadId` equals it: lifecycle-owned threads, including
+  cross-project/environment/host links and threads parented elsewhere.
+
+Include archived intermediaries; do not prune them or hidden rows before
+traversal. Check every newly reached node, not just direct links. Relationship
+alone is not proof of Gate ownership. Missing worker/relationship fields,
+truncation, failed reads, or unproven completeness mean an incomplete inventory:
+retain the worker and log pending reconciliation; no archive. An empty parent
+query is never sufficient. BB's visible-only `cascadeThreadIds` preview and
+`unarchivedDescendantCount` omit hidden targets and are not substitutes.
+
+Any additional cascade target blocks automatic cleanup, even if already settled
+or archived. If concurrent relationship changes are observed or unresolved,
+retain the worker. This read-before-archive check is not an atomic lock against
+another caller creating a relationship afterward; do not claim that guarantee.
+
+### Apply and confirm
 
 Run `bb thread archive <id> --json`, then confirm `.thread.archivedAt` via show
 and the unchanged active environment via environment show. Record archival
