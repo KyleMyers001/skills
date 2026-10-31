@@ -139,10 +139,20 @@ class GateWorkflowTests(unittest.TestCase):
             "No usable push remote", "Never merge",
             "never push the default branch", "never force-push",
             "Required checks only", "no placeholders remain",
-            "git push <push-remote> <feature-branch>",
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, self.skill)
+
+    def test_publication_pins_source_and_destination_refs(self):
+        publish = self.skill.split("## Phase 5 — Publish", 1)[1]
+        publish = " ".join(publish.replace("\\\n", "").split())
+        command = re.search(r"git push <push-remote> ([^\s`]+)", publish)
+        self.assertIsNotNone(
+            command, "Publish must provide an explicit push command")
+        self.assertEqual(
+            command.group(1),
+            "refs/heads/<feature-branch>:refs/heads/<feature-branch>",
+        )
 
     def test_direct_consumers_use_bb_but_keep_ticket_transport(self):
         ticket = self.text("orchestration/orchestrate-ticket/SKILL.md")
